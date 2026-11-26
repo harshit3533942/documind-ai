@@ -18,6 +18,9 @@ os.environ["LLM_PROVIDER"] = "extractive"
 # Rate limits are tested explicitly (test_performance.py); elsewhere they would
 # make tests depend on how many requests a test happens to send.
 os.environ["RATE_LIMIT_ENABLED"] = "false"
+# The cross-encoder is tested explicitly (test_retrieval.py); elsewhere RAG must
+# not download/load a second model.
+os.environ["RAG_RERANK_ENABLED"] = "false"
 
 import uuid  # noqa: E402
 from collections.abc import Callable, Iterator  # noqa: E402
@@ -34,6 +37,7 @@ import app.models  # noqa: F401, E402 - register models
 from app.core.dependencies import (  # noqa: E402
     get_embedder_dependency,
     get_llm_dependency,
+    get_reranker_dependency,
     get_storage,
     get_task_queue,
 )
@@ -139,6 +143,7 @@ def client(
     fastapi_app.dependency_overrides[get_task_queue] = lambda: task_queue
     fastapi_app.dependency_overrides[get_embedder_dependency] = lambda: fake_embedder
     fastapi_app.dependency_overrides[get_llm_dependency] = lambda: None
+    fastapi_app.dependency_overrides[get_reranker_dependency] = lambda: None
     with TestClient(fastapi_app) as c:
         yield c
     fastapi_app.dependency_overrides.clear()

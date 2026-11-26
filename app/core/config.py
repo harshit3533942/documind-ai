@@ -50,8 +50,10 @@ class Settings(BaseSettings):
     # --- Chunking (measured in tokens) ---
     # all-MiniLM-L6-v2 truncates input beyond 256 word-piece tokens, so chunks
     # must stay well below that or their tail is silently ignored when embedding.
-    chunk_size_tokens: int = Field(default=180, ge=20, le=2000)
-    chunk_overlap_tokens: int = Field(default=30, ge=0)
+    # 120/20 chosen with scripts/evaluate_rag.py: 180-token chunks mixed 2-3
+    # topics per chunk, which diluted their embeddings (Recall@5 86.7% -> 93.3%).
+    chunk_size_tokens: int = Field(default=120, ge=20, le=2000)
+    chunk_overlap_tokens: int = Field(default=20, ge=0)
 
     # --- LLM (answer generation) ---
     # auto       -> "openai" if OPENAI_API_KEY is set, otherwise "extractive"
@@ -73,6 +75,22 @@ class Settings(BaseSettings):
     rag_min_score: float = Field(default=0.20, ge=-1, le=1)
     rag_max_context_tokens: int = Field(default=1800, ge=100)
     rag_hnsw_ef_search: int = Field(default=100, ge=10, le=1000)
+    # vector -> semantic search only
+    # hybrid -> semantic + PostgreSQL full-text search, merged with Reciprocal
+    #           Rank Fusion (helps exact terms: codes, names, "Section 4.2")
+    rag_retrieval_mode: Literal["vector", "hybrid"] = "hybrid"
+    # Candidates fetched from EACH retriever before fusion / re-ranking.
+    rag_candidate_pool: int = Field(default=10, ge=1, le=200)  # 10 vs 20: same eval quality, ~40% faster re-ranking
+    rag_rrf_k: int = Field(default=60, ge=1)  # RRF constant (60 = value from the original paper)
+    # Cross-encoder re-ranking of the candidates (second, more accurate pass).
+    rag_rerank_enabled: bool = True
+    rag_rerank_model: str = "cross-encoder/ms-marco-MiniLM-L-6-v2"
+    # With re-ranking, the cross-encoder is the relevance gate: candidates below
+    # this score are dropped and the cosine RAG_MIN_SCORE is NOT applied (the
+    # cross-encoder judges relevance far better than cosine similarity, and a
+    # keyword hit with low cosine similarity can still reach it). Model specific
+    # (ms-marco logits); calibrated with scripts/evaluate_rag.py.
+    rag_rerank_min_score: float = -6.0
 
     # --- Rate limiting (fixed window, Redis) ---
     rate_limit_enabled: bool = True

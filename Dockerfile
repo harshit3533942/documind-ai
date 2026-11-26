@@ -18,8 +18,10 @@ RUN pip install torch==2.15.0 --index-url https://download.pytorch.org/whl/cpu \
 
 # 2) Bake the embedding model into the image: no download at container start,
 #    works without internet, and every container uses the identical model.
+#    Same for the cross-encoder used for re-ranking (RAG_RERANK_ENABLED).
 ARG EMBEDDING_MODEL_NAME=sentence-transformers/all-MiniLM-L6-v2
-RUN python -c "from sentence_transformers import SentenceTransformer as S; S('${EMBEDDING_MODEL_NAME}')"
+ARG RERANK_MODEL_NAME=cross-encoder/ms-marco-MiniLM-L-6-v2
+RUN python -c "from sentence_transformers import SentenceTransformer as S, CrossEncoder as C; S('${EMBEDDING_MODEL_NAME}'); C('${RERANK_MODEL_NAME}')"
 
 # 3) Application code.
 COPY alembic.ini ./

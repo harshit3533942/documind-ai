@@ -3,7 +3,8 @@
 Pipeline
 --------
 1. (follow-ups) rewrite the question into a standalone search query
-2. embed the query, retrieve top-k chunks of THIS user's documents (pgvector)
+2. retrieve top-k chunks of THIS user's documents: hybrid search (pgvector +
+   full-text, RRF fusion), optionally re-ranked by a cross-encoder
 3. drop chunks below RAG_MIN_SCORE; if nothing is left -> "not enough
    information", WITHOUT calling the LLM (no context = nothing to ground on)
 4. build a numbered, token-budgeted context:  <source id="1" ...> ... </source>
@@ -22,8 +23,9 @@ citation validation, and a `grounded` flag when an answer cites nothing.
 import re
 import time
 import uuid
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
 from dataclasses import dataclass, field
+from typing import Any
 
 from sqlalchemy.orm import Session
 
@@ -31,8 +33,8 @@ from app.core.config import get_settings
 from app.core.logging import get_logger
 from app.services.chunking_service import page_at, split_sentences
 from app.services.embedding_service import Embedder
-from app.services.llm_service import ChatMessage, LLMClient, LLMError
-from app.services.retrieval_service import RetrievedChunk, search_chunks
+from app.services.llm_service import ChatMessage, LLMClient, LLMError, stream_completion
+from app.services.retrieval_service import Reranker, RetrievedChunk, retrieve
 
 logger = get_logger(__name__)
 
@@ -233,10 +235,13 @@ def looks_like_follow_up(question: str) -> bool:
 
 # ------------------------------------------------------------------ service
 class RagService:
-    def __init__(self, db: Session, embedder: Embedder, llm: LLMClient | None) -> None:
+    def __init__(
+        self, db: Session, embedder: Embedder, llm: LLMClient | None, reranker: Reranker | None = None
+    ) -> None:
         self.db = db
         self.embedder = embedder
         self.llm = llm
+        self.reranker = reranker
         self.settings = get_settings()
 
     def answer(
@@ -247,6 +252,83 @@ class RagService:
         document_ids: Sequence[uuid.UUID] | None = None,
         history: Sequence[ChatMessage] = (),
     ) -> RagAnswer:
+        prep = self._prepare(user_id, question, document_ids, history)
+        if isinstance(prep, RagAnswer):
+            return prep
+
+        # 5. generate (LLM, with extractive fallback on failure)
+        t = time.perf_counter()
+        llm_error = None
+        if self.llm is not None:
+            try:
+                result = self._generate_with_llm(prep)
+                result.timings_ms = {**prep.timings, "generation": _ms(t), "total": _ms(prep.started)}
+                return result
+            except LLMError as exc:
+                llm_error = str(exc)
+                logger.warning("LLM failed (%s); falling back to extractive answer", llm_error)
+
+        result = self._generate_extractive(prep.search_query, prep.question, prep.kept)
+        result.llm_error = llm_error
+        result.timings_ms = {**prep.timings, "generation": _ms(t), "total": _ms(prep.started)}
+        return result
+
+    def answer_stream(
+        self,
+        *,
+        user_id: uuid.UUID,
+        question: str,
+        document_ids: Sequence[uuid.UUID] | None = None,
+        history: Sequence[ChatMessage] = (),
+    ) -> Iterator[tuple[str, Any]]:
+        """Same pipeline as answer(), but yields ("token", text) pieces while the
+        answer is generated and finally ("final", RagAnswer).
+
+        The final answer is authoritative: invalid citation markers are removed
+        and it may differ from the streamed text (e.g. the LLM failed half way
+        and the extractive fallback was used) - clients replace the streamed
+        text with it.
+        """
+        prep = self._prepare(user_id, question, document_ids, history)
+        if isinstance(prep, RagAnswer):
+            yield from text_pieces(prep.answer)
+            yield "final", prep
+            return
+
+        t = time.perf_counter()
+        llm_error = None
+        if self.llm is not None:
+            pieces: list[str] = []
+            try:
+                stream = stream_completion(
+                    self.llm, self._llm_messages(prep),
+                    max_tokens=self.settings.llm_max_tokens, temperature=self.settings.llm_temperature,
+                )
+                for piece in _hold_insufficient(stream, pieces):
+                    yield "token", piece
+                result = self._finish_llm("".join(pieces), self.llm.model_name, prep)
+                result.timings_ms = {**prep.timings, "generation": _ms(t), "total": _ms(prep.started)}
+                yield "final", result
+                return
+            except LLMError as exc:
+                llm_error = str(exc)
+                logger.warning("LLM stream failed (%s); falling back to extractive answer", llm_error)
+
+        result = self._generate_extractive(prep.search_query, prep.question, prep.kept)
+        result.llm_error = llm_error
+        result.timings_ms = {**prep.timings, "generation": _ms(t), "total": _ms(prep.started)}
+        yield from text_pieces(result.answer)
+        yield "final", result
+
+    def _prepare(
+        self,
+        user_id: uuid.UUID,
+        question: str,
+        document_ids: Sequence[uuid.UUID] | None,
+        history: Sequence[ChatMessage],
+    ) -> "_Prepared | RagAnswer":
+        """Steps 1-4. Returns a finished RagAnswer when there is nothing to
+        ground an answer on (no LLM call is made in that case)."""
         question = " ".join(question.split())
         if not question:
             raise ValueError("Question must not be empty")
@@ -259,11 +341,12 @@ class RagService:
         search_query = self._search_query(question, history)
         timings["rewrite"] = _ms(t)
 
-        # 2-3. retrieve + threshold
+        # 2-3. retrieve + relevance gate
         t = time.perf_counter()
-        retrieved = search_chunks(
+        retrieved = retrieve(
             self.db, self.embedder, user_id=user_id, query=search_query,
             top_k=self.settings.rag_top_k, document_ids=document_ids, min_score=self.settings.rag_min_score,
+            reranker=self.reranker,
         )
         timings["retrieval"] = _ms(t)
         if not retrieved:
@@ -272,23 +355,7 @@ class RagService:
 
         # 4. context
         context, kept = build_context(retrieved, self.embedder.count_tokens, self.settings.rag_max_context_tokens)
-
-        # 5. generate (LLM, with extractive fallback on failure)
-        t = time.perf_counter()
-        llm_error = None
-        if self.llm is not None:
-            try:
-                result = self._generate_with_llm(search_query, question, context, kept)
-                result.timings_ms = {**timings, "generation": _ms(t), "total": _ms(started)}
-                return result
-            except LLMError as exc:
-                llm_error = str(exc)
-                logger.warning("LLM failed (%s); falling back to extractive answer", llm_error)
-
-        result = self._generate_extractive(search_query, question, kept)
-        result.llm_error = llm_error
-        result.timings_ms = {**timings, "generation": _ms(t), "total": _ms(started)}
-        return result
+        return _Prepared(question, search_query, kept, context, timings, started)
 
     # ------------------------------------------------------------ steps
     def _search_query(self, question: str, history: Sequence[ChatMessage]) -> str:
@@ -310,27 +377,36 @@ class RagService:
         # Heuristic without an LLM: carry the previous question's topic along.
         return f"{previous_questions[-1]} {question}"[:MAX_QUESTION_CHARS]
 
-    def _generate_with_llm(self, search_query: str, question: str, context: str, kept: list[RetrievedChunk]) -> RagAnswer:
+    @staticmethod
+    def _llm_messages(prep: "_Prepared") -> list[ChatMessage]:
+        user_prompt = f"SOURCES:\n{prep.context}\n\nQUESTION: {prep.question}"
+        if prep.search_query != prep.question:
+            user_prompt += f"\n(Standalone form of the question: {prep.search_query})"
+        return [ChatMessage("system", SYSTEM_PROMPT), ChatMessage("user", user_prompt)]
+
+    def _generate_with_llm(self, prep: "_Prepared") -> RagAnswer:
         if self.llm is None:  # explicit check: `assert` is stripped under python -O
             raise RuntimeError("LLM generation requested without an LLM client")
-        user_prompt = f"SOURCES:\n{context}\n\nQUESTION: {question}"
-        if search_query != question:
-            user_prompt += f"\n(Standalone form of the question: {search_query})"
         out = self.llm.complete(
-            [ChatMessage("system", SYSTEM_PROMPT), ChatMessage("user", user_prompt)],
+            self._llm_messages(prep),
             max_tokens=self.settings.llm_max_tokens,
             temperature=self.settings.llm_temperature,
         )
-        sources = self._sources(kept, self._scored_sentences(kept, question, search_query))
-        text = out.text.strip()
+        return self._finish_llm(out.text, out.model, prep)
+
+    def _finish_llm(self, raw_text: str, model: str, prep: "_Prepared") -> RagAnswer:
+        """LLM text -> RagAnswer: "insufficient" check + citation validation."""
+        kept, search_query = prep.kept, prep.search_query
+        sources = self._sources(kept, self._scored_sentences(kept, prep.question, search_query))
+        text = raw_text.strip()
         if not text or text.upper().startswith(INSUFFICIENT_TOKEN):
-            return RagAnswer(NO_ANSWER_MESSAGE, False, "llm", False, [], sources, search_query, model=out.model)
+            return RagAnswer(NO_ANSWER_MESSAGE, False, "llm", False, [], sources, search_query, model=model)
 
         answer, used = parse_citations(text.replace(INSUFFICIENT_TOKEN, "").strip(), len(kept))
         citations = [sources[n - 1] for n in used]
         if not citations:
             logger.warning("LLM answer contains no valid citations; marking as ungrounded")
-        return RagAnswer(answer, True, "llm", bool(citations), citations, sources, search_query, model=out.model)
+        return RagAnswer(answer, True, "llm", bool(citations), citations, sources, search_query, model=model)
 
     def _generate_extractive(self, search_query: str, question: str, kept: list[RetrievedChunk]) -> RagAnswer:
         """No LLM: quote the sentences most similar to the question, with citations."""
@@ -425,6 +501,55 @@ class RagService:
             page_start=p1, page_end=p2, chunk_page_start=chunk.page_start, chunk_page_end=chunk.page_end,
             score=round(chunk.score, 4), excerpt=text,
         )
+
+
+@dataclass
+class _Prepared:
+    """Result of steps 1-4, input of the generation step."""
+
+    question: str
+    search_query: str
+    kept: list[RetrievedChunk]
+    context: str
+    timings: dict[str, float]
+    started: float
+
+
+def _hold_insufficient(stream: Iterator[str], collected: list[str]) -> Iterator[str]:
+    """Pass LLM pieces through - except the INSUFFICIENT_CONTEXT keyword.
+
+    The start of the answer is held back while it could still become that
+    keyword. If it does, nothing is shown (the final "not enough information"
+    message replaces it). Everything received is appended to `collected`.
+    """
+    buffer, decided = "", False
+    for piece in stream:
+        collected.append(piece)
+        if decided:
+            yield piece
+            continue
+        buffer += piece
+        head = buffer.lstrip().upper()
+        if head.startswith(INSUFFICIENT_TOKEN):
+            collected.extend(stream)  # read the rest silently
+            return
+        if INSUFFICIENT_TOKEN.startswith(head):
+            continue  # could still become the keyword - keep holding
+        decided = True
+        yield buffer
+    if not decided and buffer.strip():
+        yield buffer  # a very short answer that only looked like the keyword's start
+
+
+_PIECE = re.compile(r"\S+\s*")
+
+
+def text_pieces(text: str, words_per_piece: int = 3) -> Iterator[tuple[str, str]]:
+    """Stream an already complete answer (extractive mode, cache hit, no
+    answer) in small pieces, so every answer reaches the client the same way."""
+    words = _PIECE.findall(text)
+    for i in range(0, len(words), words_per_piece):
+        yield "token", "".join(words[i : i + words_per_piece])
 
 
 def _ms(start: float) -> float:

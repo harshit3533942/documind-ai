@@ -16,6 +16,7 @@ from app.models import User, UserRole
 from app.repositories.user_repository import UserRepository
 from app.services.embedding_service import Embedder, get_embedder
 from app.services.llm_service import LLMClient, get_llm_client
+from app.services.retrieval_service import Reranker
 from app.services.storage_service import LocalStorage
 from app.services.task_queue import CeleryTaskQueue, TaskQueue
 
@@ -96,5 +97,12 @@ def get_llm_dependency() -> LLMClient | None:
     return get_llm_client()  # None -> extractive mode
 
 
+def get_reranker_dependency() -> Reranker | None:
+    from app.services.rerank_service import get_reranker
+
+    return get_reranker()  # None -> re-ranking disabled
+
+
 EmbedderDep = Annotated[Embedder, Depends(get_embedder_dependency)]
+RerankerDep = Annotated[Reranker | None, Depends(get_reranker_dependency)]
 LLMDep = Annotated[LLMClient | None, Depends(get_llm_dependency)]

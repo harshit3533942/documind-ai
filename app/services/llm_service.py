@@ -5,6 +5,7 @@ OpenAI-compatible Chat Completions endpoint (OpenAI, Groq, Together, Ollama...)
 selected by OPENAI_BASE_URL. Tests use a fake client - no network, no cost.
 """
 
+from collections.abc import Iterator
 from dataclasses import dataclass
 from functools import lru_cache
 from typing import Protocol
@@ -38,6 +39,24 @@ class LLMClient(Protocol):
     def model_name(self) -> str: ...
 
     def complete(self, messages: list[ChatMessage], *, max_tokens: int, temperature: float) -> LLMResult: ...
+
+
+class StreamingLLMClient(LLMClient, Protocol):
+    """Optional capability: yield the answer piece by piece as it is generated."""
+
+    def stream(self, messages: list[ChatMessage], *, max_tokens: int, temperature: float) -> Iterator[str]: ...
+
+
+def stream_completion(
+    llm: LLMClient, messages: list[ChatMessage], *, max_tokens: int, temperature: float
+) -> Iterator[str]:
+    """Token stream from any client: real streaming if supported, otherwise
+    the complete answer as a single piece (same result, just not incremental)."""
+    stream = getattr(llm, "stream", None)
+    if stream is None:
+        yield llm.complete(messages, max_tokens=max_tokens, temperature=temperature).text
+        return
+    yield from stream(messages, max_tokens=max_tokens, temperature=temperature)
 
 
 DEFAULT_OPENAI_BASE_URL = "https://api.openai.com/v1"
@@ -93,6 +112,30 @@ class OpenAIChatClient:
             prompt_tokens=usage.prompt_tokens if usage else None,
             completion_tokens=usage.completion_tokens if usage else None,
         )
+
+
+    def stream(self, messages: list[ChatMessage], *, max_tokens: int, temperature: float) -> Iterator[str]:
+        """Server-sent token deltas (`stream=True`). Errors - also ones in the
+        middle of the stream - are raised as LLMError, like complete()."""
+        import openai
+
+        try:
+            stream = self._client.chat.completions.create(
+                model=self._model,
+                messages=[{"role": m.role, "content": m.content} for m in messages],
+                max_tokens=max_tokens,
+                temperature=temperature,
+                stream=True,
+            )
+            produced = False
+            for event in stream:
+                if event.choices and (delta := event.choices[0].delta.content):
+                    produced = True
+                    yield delta
+        except openai.APIError as exc:
+            raise LLMError(f"LLM request failed: {type(exc).__name__}") from None
+        if not produced:
+            raise LLMError("LLM returned an empty response")
 
 
 @lru_cache

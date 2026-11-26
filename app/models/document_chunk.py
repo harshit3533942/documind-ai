@@ -2,8 +2,8 @@ import uuid
 from typing import TYPE_CHECKING
 
 from pgvector.sqlalchemy import Vector
-from sqlalchemy import CheckConstraint, ForeignKey, Index, Integer, Text, UniqueConstraint
-from sqlalchemy.dialects.postgresql import JSONB, UUID
+from sqlalchemy import CheckConstraint, Computed, ForeignKey, Index, Integer, Text, UniqueConstraint
+from sqlalchemy.dialects.postgresql import JSONB, TSVECTOR, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.config import get_settings
@@ -13,6 +13,7 @@ if TYPE_CHECKING:
     from app.models.document import Document
 
 EMBEDDING_DIM = get_settings().embedding_dimension
+FTS_CONFIG = "english"  # PostgreSQL text-search configuration (language rules)
 
 
 class DocumentChunk(UUIDPrimaryKeyMixin, CreatedAtMixin, Base):
@@ -39,6 +40,13 @@ class DocumentChunk(UUIDPrimaryKeyMixin, CreatedAtMixin, Base):
     page_offsets: Mapped[list[list[int]] | None] = mapped_column(JSONB)
     # NULL until the embedding step runs.
     embedding: Mapped[list[float] | None] = mapped_column(Vector(EMBEDDING_DIM))
+    # Full-text search vector for hybrid (keyword + semantic) retrieval.
+    # GENERATED ALWAYS ... STORED: PostgreSQL computes it from `content` on every
+    # insert/update, so it can never get out of sync and no Python code writes it.
+    # 'english' config = stemming ("policies" -> "polici") + stop-word removal.
+    content_tsv: Mapped[str | None] = mapped_column(
+        TSVECTOR, Computed(f"to_tsvector('{FTS_CONFIG}'::regconfig, content)", persisted=True)
+    )
 
     document: Mapped["Document"] = relationship(back_populates="chunks")
 
@@ -56,6 +64,8 @@ class DocumentChunk(UUIDPrimaryKeyMixin, CreatedAtMixin, Base):
             postgresql_with={"m": 16, "ef_construction": 64},
             postgresql_ops={"embedding": "vector_cosine_ops"},
         ),
+        # GIN = inverted index (lexeme -> rows), the standard index for tsvector.
+        Index("ix_document_chunks_content_tsv", "content_tsv", postgresql_using="gin"),
     )
 
     def __repr__(self) -> str:
