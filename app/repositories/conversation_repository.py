@@ -1,0 +1,122 @@
+"""Data access for conversations and messages.
+
+OWNERSHIP RULE: every read takes `user_id` and puts it in the WHERE clause.
+Messages are only reachable through a conversation the user owns.
+"""
+
+import uuid
+from dataclasses import dataclass
+from datetime import datetime
+from typing import Any
+
+from sqlalchemy import func, select, update
+from sqlalchemy.orm import Session
+
+from app.models import Conversation, Message, MessageRole
+
+PREVIEW_CHARS = 120
+
+
+@dataclass(frozen=True)
+class ConversationSummary:
+    conversation: Conversation
+    message_count: int
+    last_message_preview: str | None
+    last_message_at: datetime | None
+
+
+class ConversationRepository:
+    def __init__(self, db: Session) -> None:
+        self.db = db
+
+    # ------------------------------------------------------------ conversations
+    def create(self, user_id: uuid.UUID, title: str) -> Conversation:
+        conversation = Conversation(user_id=user_id, title=title)
+        self.db.add(conversation)
+        self.db.flush()
+        return conversation
+
+    def get_for_user(self, conversation_id: uuid.UUID, user_id: uuid.UUID) -> Conversation | None:
+        return self.db.scalar(
+            select(Conversation).where(Conversation.id == conversation_id, Conversation.user_id == user_id)
+        )
+
+    def list_for_user(self, user_id: uuid.UUID, *, limit: int, offset: int) -> tuple[list[ConversationSummary], int]:
+        """ONE query for the page, however many conversations: message counts and
+        the last message come from correlated subqueries, not a query per row
+        (that would be the N+1 problem)."""
+        count_sq = (
+            select(func.count(Message.id)).where(Message.conversation_id == Conversation.id).scalar_subquery()
+        )
+        last_content_sq = (
+            select(func.left(Message.content, PREVIEW_CHARS))
+            .where(Message.conversation_id == Conversation.id)
+            .order_by(Message.created_at.desc(), Message.id.desc())
+            .limit(1)
+            .scalar_subquery()
+        )
+        last_at_sq = select(func.max(Message.created_at)).where(Message.conversation_id == Conversation.id).scalar_subquery()
+
+        total = self.db.scalar(select(func.count()).select_from(Conversation).where(Conversation.user_id == user_id)) or 0
+        rows = self.db.execute(
+            select(Conversation, count_sq, last_content_sq, last_at_sq)
+            .where(Conversation.user_id == user_id)
+            .order_by(Conversation.updated_at.desc(), Conversation.id)
+            .limit(limit)
+            .offset(offset)
+        ).all()
+        return [ConversationSummary(c, n or 0, preview, at) for c, n, preview, at in rows], total
+
+    def message_count(self, conversation_id: uuid.UUID) -> int:
+        return self.db.scalar(select(func.count()).select_from(Message).where(Message.conversation_id == conversation_id)) or 0
+
+    def touch(self, conversation_id: uuid.UUID) -> None:
+        """Bump updated_at so the conversation moves to the top of the sidebar.
+        clock_timestamp() (real time) rather than now() (transaction start):
+        activity order must not depend on transaction boundaries."""
+        self.db.execute(
+            update(Conversation)
+            .where(Conversation.id == conversation_id)
+            .values(updated_at=func.clock_timestamp())
+            .execution_options(synchronize_session=False)
+        )
+
+    def delete(self, conversation: Conversation) -> None:
+        self.db.delete(conversation)  # messages removed by ON DELETE CASCADE
+        self.db.flush()
+
+    # ------------------------------------------------------------ messages
+    def add_message(
+        self, conversation_id: uuid.UUID, role: MessageRole, content: str, sources: dict[str, Any] | None = None
+    ) -> Message:
+        # clock_timestamp(), not the column default now(): now() is the
+        # TRANSACTION start time, so a question and its answer saved in one
+        # transaction would get identical timestamps and an unstable order.
+        message = Message(
+            conversation_id=conversation_id, role=role, content=content, sources=sources,
+            created_at=func.clock_timestamp(),
+        )
+        self.db.add(message)
+        self.db.flush()
+        return message
+
+    def list_messages(self, conversation_id: uuid.UUID, *, limit: int, offset: int) -> tuple[list[Message], int]:
+        total = self.message_count(conversation_id)
+        rows = self.db.scalars(
+            select(Message)
+            .where(Message.conversation_id == conversation_id)
+            .order_by(Message.created_at, Message.id)
+            .limit(limit)
+            .offset(offset)
+        ).all()
+        return list(rows), total
+
+    def recent_messages(self, conversation_id: uuid.UUID, limit: int) -> list[Message]:
+        """The last `limit` messages, oldest first (conversation context for follow-ups)."""
+        rows = self.db.scalars(
+            select(Message)
+            .where(Message.conversation_id == conversation_id)
+            .order_by(Message.created_at.desc(), Message.id.desc())
+            .limit(limit)
+        ).all()
+        return list(reversed(rows))

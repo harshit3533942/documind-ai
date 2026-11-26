@@ -1,0 +1,139 @@
+# DocuMind AI - complete local deployment.
+#
+#   Full stack:      docker compose up -d --build        -> http://localhost:8080
+#   Only DB + Redis: docker compose up -d postgres redis  (for local development / pytest)
+#   Logs:            docker compose logs -f api worker
+#   Stop:            docker compose down                  (data is kept in volumes)
+#   Reset ALL data:  docker compose down -v               (DELETES database, uploads)
+#
+# Required in .env: JWT_SECRET_KEY. Optional: POSTGRES_PASSWORD, OPENAI_API_KEY, ...
+# See docs/deployment.md.
+
+name: documindai   # pinned: existing volumes are named documindai_*
+
+x-app: &app
+  image: documind-backend:latest
+  build:
+    context: .
+  restart: unless-stopped
+  environment: &app-env
+    ENVIRONMENT: ${ENVIRONMENT:-development}
+    LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-documind}:${POSTGRES_PASSWORD:-documind_dev_password}@postgres:5432/${POSTGRES_DB:-documind}
+    REDIS_URL: redis://redis:6379/0
+    JWT_SECRET_KEY: ${JWT_SECRET_KEY:?JWT_SECRET_KEY must be set in .env}
+    LLM_PROVIDER: ${LLM_PROVIDER:-auto}
+    OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+    OPENAI_BASE_URL: ${OPENAI_BASE_URL:-}
+    OPENAI_MODEL: ${OPENAI_MODEL:-gpt-4o-mini}
+    CORS_ORIGINS: '["http://localhost:${FRONTEND_PORT:-8080}"]'
+    HSTS_ENABLED: ${HSTS_ENABLED:-false}
+  volumes:
+    - uploads_data:/app/storage/uploads   # shared by api (writes) and worker (reads)
+  depends_on: &app-deps
+    postgres:
+      condition: service_healthy
+    redis:
+      condition: service_healthy
+
+services:
+  # ------------------------------------------------------------ data stores
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: documind-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-documind}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-documind_dev_password}
+      POSTGRES_DB: ${POSTGRES_DB:-documind}
+    ports:
+      - "127.0.0.1:5432:5432"   # localhost only (for local development / tests)
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./docker/postgres/init-test-db.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-documind} -d ${POSTGRES_DB:-documind}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    container_name: documind-redis
+    restart: unless-stopped
+    # Append-only file: queued jobs survive a Redis restart.
+    command: ["redis-server", "--appendonly", "yes"]
+    ports:
+      - "127.0.0.1:6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # ------------------------------------------------------------ backend
+  migrate:
+    <<: *app
+    command: ["alembic", "upgrade", "head"]
+    restart: "no"          # one-off job: apply migrations, then exit
+    healthcheck:
+      disable: true
+
+  api:
+    <<: *app
+    depends_on:
+      <<: *app-deps
+      migrate:
+        condition: service_completed_successfully
+    ports:
+      - "127.0.0.1:8000:8000"   # debugging only; users go through nginx (frontend)
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/health/ready', timeout=4).status == 200 else 1)"]
+      interval: 15s
+      timeout: 6s
+      start_period: 90s
+      retries: 5
+
+  worker:
+    <<: *app
+    command: ["celery", "-A", "app.tasks.celery_app", "worker", "--loglevel=INFO",
+              "--concurrency=${WORKER_CONCURRENCY:-1}", "--queues=documents"]
+    depends_on:
+      <<: *app-deps
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD-SHELL", "celery -A app.tasks.celery_app inspect ping --destination celery@$$HOSTNAME --timeout 10 | grep -q pong"]
+      interval: 60s
+      timeout: 30s
+      start_period: 120s
+      retries: 3
+
+  beat:
+    <<: *app
+    command: ["celery", "-A", "app.tasks.celery_app", "beat", "--loglevel=INFO", "--schedule=/tmp/celerybeat-schedule"]
+    depends_on:
+      <<: *app-deps
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      disable: true
+
+  # ------------------------------------------------------------ frontend + reverse proxy
+  frontend:
+    build:
+      context: ./frontend
+    image: documind-frontend:latest
+    restart: unless-stopped
+    ports:
+      - "${FRONTEND_PORT:-8080}:80"
+    depends_on:
+      api:
+        condition: service_healthy
+
+volumes:
+  postgres_data:
+  redis_data:
+  uploads_data:

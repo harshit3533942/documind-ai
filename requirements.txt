@@ -1,0 +1,39 @@
+# All versions pinned for reproducible builds.
+# Security: scanned with `pip-audit -r requirements.txt` (Phase 13, 2026-11-24):
+# 0 known vulnerabilities. Re-run before every release.
+
+# ---- Web framework ----
+fastapi==0.165.0
+uvicorn[standard]==0.54.0
+pydantic==2.14.4
+pydantic-settings==2.16.3
+python-multipart==0.0.34
+
+# ---- Database ----
+sqlalchemy==2.0.36
+alembic==1.14.0
+psycopg[binary]==3.2.3
+pgvector==0.3.6
+
+# ---- Authentication ----
+argon2-cffi==23.1.0
+pyjwt==2.15.1
+email-validator==2.2.0
+
+# ---- PDF processing ----
+pymupdf==1.25.1
+
+# ---- Embeddings ----
+# On Windows/macOS PyPI ships CPU builds of torch. On Linux (Docker/CI) install
+# torch first from https://download.pytorch.org/whl/cpu to avoid the ~2 GB CUDA build.
+torch==2.15.0
+sentence-transformers==6.3.0
+transformers==5.24.0
+
+# ---- Background processing ----
+celery[redis]==5.4.0
+kombu==5.4.2   # 5.5+ requires redis-py>=6.1 (checked only at runtime!)
+redis==5.2.1
+
+# ---- LLM (OpenAI-compatible API, optional) ----
+openai==1.59.7

@@ -1,0 +1,15 @@
+# Development, testing and security tooling (not installed in the production image).
+-r requirements.txt
+
+# ---- Testing ----
+pytest==9.2.0
+httpx==0.28.1
+fakeredis==2.26.2
+pytest-cov==6.0.0
+
+# ---- Security audit ----
+bandit==1.8.0
+pip-audit==2.7.3
+
+# ---- Browser end-to-end test (also run: python -m playwright install chromium) ----
+playwright==1.49.1
