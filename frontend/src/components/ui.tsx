@@ -110,3 +110,16 @@ export function timeAgo(iso: string): string {
 export function pageLabel(start: number, end: number): string {
   return start === end ? `p. ${start}` : `pp. ${start}–${end}`;
 }
+
+/** "Reading page 12 of 40" with a thin bar, shown while a document is processed. */
+export function ProcessingProgress({ done, total }: { done: number; total: number }) {
+  const pct = total ? Math.min(100, Math.round((done / total) * 100)) : 0;
+  return (
+    <div className="mt-1.5 w-36" aria-label={`Processing page ${done} of ${total}`}>
+      <div className="h-1.5 overflow-hidden rounded-full bg-slate-100" role="progressbar" aria-valuenow={pct} aria-valuemin={0} aria-valuemax={100}>
+        <div className="h-full rounded-full bg-brand-500 transition-all" style={{ width: `${pct}%` }} />
+      </div>
+      <p className="mt-0.5 text-[11px] text-ink-soft">Page {done} of {total}</p>
+    </div>
+  );
+}

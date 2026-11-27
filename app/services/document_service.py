@@ -154,6 +154,10 @@ class DocumentService:
             raise NotFoundError("The original file is no longer available")
         return document, path
 
+    def active_documents(self, user: User) -> list[Document]:
+        """The user's documents that are not finished yet (uploaded/queued/processing)."""
+        return self.documents.list_active(user.id)
+
     def list_documents(self, user: User, *, limit: int, offset: int, status: DocumentStatus | None) -> tuple[list[Document], int]:
         return self.documents.list_for_user(user.id, limit=limit, offset=offset, status=status)
 

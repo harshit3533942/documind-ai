@@ -186,6 +186,9 @@ class Settings(BaseSettings):
     # A document stuck in "processing" longer than this is considered abandoned
     # (worker crashed / was killed) and may be claimed again.
     processing_stale_after: int = Field(default=30 * 60, ge=60)
+    # Live status stream (GET /documents/events) closes after this many seconds;
+    # the browser reconnects. Bounded so no connection (or expired login) lives forever.
+    document_events_max_seconds: float = Field(default=600, gt=0, le=3600)
 
     @property
     def broker_url(self) -> str:

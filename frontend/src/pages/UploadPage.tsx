@@ -2,7 +2,8 @@ import { useRef, useState, type DragEvent } from "react";
 import { Link } from "react-router-dom";
 import { ApiError, api, uploadDocument } from "../api/client";
 import { ACTIVE_STATUSES, type DocumentItem } from "../api/types";
-import { Card, ErrorBanner, PageHeader, StatusBadge, formatBytes } from "../components/ui";
+import { Card, ErrorBanner, PageHeader, ProcessingProgress, StatusBadge, formatBytes } from "../components/ui";
+import { useDocumentEvents, type Progress } from "../hooks";
 
 const MAX_MB = 20; // matches the backend default MAX_UPLOAD_SIZE_MB (backend enforces it)
 
@@ -11,6 +12,7 @@ interface UploadItem {
   file: File;
   progress: number;
   doc?: DocumentItem;
+  processing?: Progress; // live "page x of y"
   error?: string;
 }
 
@@ -22,18 +24,34 @@ export function UploadPage() {
   const update = (key: string, patch: Partial<UploadItem>) =>
     setItems((prev) => prev.map((i) => (i.key === key ? { ...i, ...patch } : i)));
 
-  // After upload: poll this document's status until it is completed/failed.
+  // Live status: apply each event to the matching upload; fetch final details when done.
+  const live = useDocumentEvents((e) => {
+    setItems((prev) => prev.map((i) => {
+      if (i.doc?.id !== e.document_id) return i;
+      const progress = e.status === "processing" && e.pages_total ? { done: e.pages_done ?? 0, total: e.pages_total } : undefined;
+      return { ...i, doc: { ...i.doc, status: e.status, error_message: e.error_message ?? i.doc.error_message }, processing: progress };
+    }));
+    if (e.status === "completed" || e.status === "failed") {
+      api.getDocument(e.document_id)
+        .then((fresh) => setItems((prev) => prev.map((i) => (i.doc?.id === fresh.id ? { ...i, doc: fresh } : i))))
+        .catch(() => {});
+    }
+  });
+  const liveRef = useRef(live);
+  liveRef.current = live;
+
+  // Fallback poll until completed/failed (slow while live events arrive).
   const watch = (key: string, doc: DocumentItem) => {
     const poll = async () => {
       try {
         const fresh = await api.getDocument(doc.id);
-        update(key, { doc: fresh });
-        if (ACTIVE_STATUSES.includes(fresh.status)) window.setTimeout(poll, 1500);
+        setItems((prev) => prev.map((i) => (i.key === key && i.doc && ACTIVE_STATUSES.includes(i.doc.status) ? { ...i, doc: fresh } : i)));
+        if (ACTIVE_STATUSES.includes(fresh.status)) window.setTimeout(poll, liveRef.current ? 15_000 : 1500);
       } catch {
         /* stop polling on error; the library page still shows the status */
       }
     };
-    window.setTimeout(poll, 800);
+    window.setTimeout(poll, liveRef.current ? 15_000 : 800);
   };
 
   const start = (files: FileList | File[]) => {
@@ -99,6 +117,7 @@ export function UploadPage() {
                 <span className="text-xs text-ink-soft">{formatBytes(item.file.size)}</span>
                 {item.doc && <StatusBadge status={item.doc.status} />}
               </div>
+              {item.doc?.status === "processing" && item.processing && <ProcessingProgress {...item.processing} />}
               {!item.error && !item.doc && (
                 <div className="mt-2 h-2 overflow-hidden rounded-full bg-slate-100" role="progressbar" aria-valuenow={Math.round(item.progress * 100)}>
                   <div className="h-full rounded-full bg-brand-500 transition-all" style={{ width: `${Math.round(item.progress * 100)}%` }} />

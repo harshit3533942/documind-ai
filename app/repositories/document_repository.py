@@ -33,6 +33,15 @@ class DocumentRepository:
             select(Document).where(Document.user_id == user_id, Document.file_hash == file_hash).limit(1)
         )
 
+    def list_active(self, user_id: uuid.UUID, limit: int = 100) -> list[Document]:
+        active = (DocumentStatus.UPLOADED, DocumentStatus.QUEUED, DocumentStatus.PROCESSING)
+        return list(self.db.scalars(
+            select(Document)
+            .where(Document.user_id == user_id, Document.status.in_(active))
+            .order_by(Document.created_at.desc())
+            .limit(limit)
+        ))
+
     def list_for_user(
         self,
         user_id: uuid.UUID,

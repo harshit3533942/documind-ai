@@ -33,7 +33,7 @@ from sqlalchemy.orm import Session
 from app.core.config import get_settings
 from app.core.logging import get_logger
 from app.models import Document, DocumentChunk, DocumentStatus
-from app.services import cache_service, pdf_service
+from app.services import cache_service, document_events, pdf_service
 from app.services.chunking_service import ChunkingConfig, TextChunk, TextChunker
 from app.services.embedding_service import Embedder, EmbeddingConfigError, get_embedder
 from app.services.storage_service import LocalStorage, StorageError
@@ -91,24 +91,30 @@ class DocumentProcessor:
         if document is None:
             return ProcessingResult(document_id, status="skipped")
         owner_id = document.user_id
+        pages_total = document.total_pages
         # The document is now "processing" -> excluded from search: cached answers
         # that may have cited it must not be served any more.
         cache_service.bump_document_version(owner_id)
+        document_events.publish(owner_id, document_id, "processing", pages_done=0, pages_total=pages_total)
 
         try:
-            result = self._run(document)
+            result = self._run(document, document_events.ProgressReporter(owner_id, document_id, pages_total))
         except PermanentProcessingError as exc:
             self.db.rollback()
             self._mark_failed(document_id, exc.message)
+            document_events.publish(owner_id, document_id, "failed", error_message=exc.message)
             logger.info("Document %s failed permanently: %s", document_id, exc.message)
             return ProcessingResult(document_id, status="failed", error=exc.message)
         except Exception:
             self.db.rollback()
             self._mark_failed(document_id, INTERNAL_ERROR_MESSAGE)
+            document_events.publish(owner_id, document_id, "failed", error_message=INTERNAL_ERROR_MESSAGE)
             logger.exception("Document %s failed with an unexpected error", document_id)
             raise
 
         cache_service.bump_document_version(owner_id)  # new chunks are searchable now
+        document_events.publish(owner_id, document_id, "completed",
+                                pages_done=result.total_pages, pages_total=result.total_pages)
         logger.info(
             "Document %s processed: %d pages, %d chunks (%d embedded, %d reused), %d empty pages",
             document_id, result.total_pages, result.chunk_count, result.embedded_count,
@@ -162,7 +168,7 @@ class DocumentProcessor:
         )
         return {content_hash(content): embedding for content, embedding in rows}
 
-    def _run(self, document: Document) -> ProcessingResult:
+    def _run(self, document: Document, progress: "document_events.ProgressReporter | None" = None) -> ProcessingResult:
         self._check_chunk_size_fits_model()
         try:
             path = self.storage.path_for(document.storage_key)
@@ -178,6 +184,8 @@ class DocumentProcessor:
             nonlocal total_chars
             for page in pdf_service.iter_pages(path):
                 result.total_pages = page.page_number
+                if progress is not None:
+                    progress.page_done(page.page_number)
                 if page.text:
                     total_chars += len(page.text)
                     yield page
@@ -262,16 +270,18 @@ class DocumentProcessor:
 def mark_queued(db: Session, document_id: uuid.UUID, *, from_statuses: tuple[DocumentStatus, ...]) -> bool:
     """Conditional status change. Returns False if the document was in another
     state (e.g. a fast worker already moved it to processing - never overwrite that)."""
-    changed = db.execute(
+    owner_id = db.execute(
         update(Document)
         .where(Document.id == document_id, Document.status.in_(from_statuses))
         # A fresh attempt starts clean: a stale error next to "queued" would mislead users.
         .values(status=DocumentStatus.QUEUED, error_message=None, updated_at=func.now())
-        .returning(Document.id)
+        .returning(Document.user_id)
         .execution_options(synchronize_session=False)
     ).scalar()
     db.commit()
-    return changed is not None
+    if owner_id is not None:
+        document_events.publish(owner_id, document_id, "queued")
+    return owner_id is not None
 
 
 def stale_document_ids(db: Session, *, unqueued_after: int, limit: int = 100) -> list[uuid.UUID]:

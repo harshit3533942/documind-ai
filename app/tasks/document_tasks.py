@@ -25,6 +25,7 @@ from app.core.dependencies import get_storage
 from app.core.logging import get_logger
 from app.database.connection import SessionLocal
 from app.models import Document, DocumentStatus
+from app.services import document_events
 from app.services.document_processing_service import DocumentProcessor, mark_queued, stale_document_ids
 from app.services.embedding_service import EmbeddingConfigError, get_embedder
 from app.tasks.celery_app import celery_app
@@ -45,15 +46,18 @@ _embedder_factory = get_embedder
 def _set_failed(document_id: uuid.UUID, message: str) -> None:
     db = _session_factory()
     try:
-        db.execute(
+        owner_id = db.execute(
             update(Document)
             .where(Document.id == document_id)
             .values(status=DocumentStatus.FAILED, error_message=message)
+            .returning(Document.user_id)
             .execution_options(synchronize_session=False)
-        )
+        ).scalar()
         db.commit()
     finally:
         db.close()
+    if owner_id is not None:
+        document_events.publish(owner_id, document_id, "failed", error_message=message)
 
 
 @celery_app.task(bind=True, name="documents.process", max_retries=settings.processing_max_retries)

@@ -2,11 +2,11 @@ import { useState } from "react";
 import { Link } from "react-router-dom";
 import { api } from "../api/client";
 import type { DocumentItem } from "../api/types";
-import { Button, Card, EmptyState, ErrorBanner, PageHeader, Spinner, StatusBadge, formatBytes, timeAgo } from "../components/ui";
+import { Button, Card, EmptyState, ErrorBanner, PageHeader, ProcessingProgress, Spinner, StatusBadge, formatBytes, timeAgo } from "../components/ui";
 import { useDocuments } from "../hooks";
 
 export function DocumentsPage() {
-  const { documents, loading, error, refresh, restartPolling } = useDocuments();
+  const { documents, progress, live, loading, error, refresh, restartPolling } = useDocuments();
   const [actionError, setActionError] = useState<string | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
 
@@ -39,7 +39,7 @@ export function DocumentsPage() {
     <>
       <PageHeader
         title="Document library"
-        subtitle="Status updates automatically while documents are being processed."
+        subtitle={live ? "Live: status updates appear instantly while documents are processed." : "Status updates automatically while documents are being processed."}
         actions={<Link to="/upload" className="rounded-lg border border-brand-600 bg-brand-50 px-3.5 py-2 text-sm font-medium text-brand-800 hover:bg-brand-100">Upload PDF</Link>}
       />
       <div className="space-y-3">
@@ -70,7 +70,10 @@ export function DocumentsPage() {
                       <p className="max-w-xs truncate font-medium text-ink" title={d.filename}>{d.filename}</p>
                       {d.error_message && <p className="mt-1 max-w-md text-xs text-red-700">{d.error_message}</p>}
                     </td>
-                    <td className="px-3 py-3"><StatusBadge status={d.status} /></td>
+                    <td className="px-3 py-3">
+                      <StatusBadge status={d.status} />
+                      {d.status === "processing" && progress[d.id] && <ProcessingProgress {...progress[d.id]!} />}
+                    </td>
                     <td className="px-3 py-3 text-ink-muted">{d.total_pages ?? "–"}</td>
                     <td className="px-3 py-3 text-ink-muted">{formatBytes(d.file_size)}</td>
                     <td className="px-3 py-3 text-ink-muted">{timeAgo(d.created_at)}</td>

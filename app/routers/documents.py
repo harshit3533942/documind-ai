@@ -4,8 +4,12 @@ lookup is scoped to that user inside the service/repository layer."""
 import uuid
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, File, Query, Response, UploadFile, status
-from fastapi.responses import FileResponse
+from fastapi import APIRouter, Depends, File, Query, Request, Response, UploadFile, status
+from fastapi.responses import FileResponse, StreamingResponse
+
+from app.core.config import get_settings
+from app.core.sse import sse_response
+from app.services import document_events
 
 from app.core.dependencies import CurrentUser, DbSession, Queue, Storage
 from app.core.rate_limit import limit_by_user
@@ -36,6 +40,35 @@ def upload_document(
         user, stream=file.file, filename=file.filename, content_type=file.content_type
     )
     return DocumentRead.model_validate(document)
+
+
+@router.get(
+    "/events", response_class=StreamingResponse,
+    responses={200: {"content": {"text/event-stream": {}},
+                     "description": "Server-Sent Events: `snapshot`, then `document` events"}},
+)
+def document_status_events(request: Request, user: CurrentUser, db: DbSession, storage: Storage) -> StreamingResponse:
+    """Live processing status of YOUR documents (replaces polling).
+
+    * `snapshot` - `{documents: [{document_id, status, pages_done?, pages_total?}], live}`:
+      your unfinished documents right now (sent first, also after every reconnect)
+    * `document` - one status change or progress update, same fields + `error_message`
+
+    The stream ends after DOCUMENT_EVENTS_MAX_SECONDS; reconnect to continue.
+    `live: false` = Redis is unavailable, poll instead.
+    """
+    # The snapshot is read here, before streaming starts: the DB session is not
+    # used (or kept open) for the lifetime of the stream.
+    active = DocumentService(db, storage).active_documents(user)
+    snapshot = []
+    for d in active:
+        item = {"document_id": str(d.id), "status": d.status.value}
+        if d.status == DocumentStatus.PROCESSING and (p := document_events.progress(d.id)):
+            item |= {"pages_done": p.get("pages_done"), "pages_total": p.get("pages_total")}
+        snapshot.append(item)
+    return sse_response(document_events.stream_events(
+        user.id, snapshot, request.is_disconnected, max_seconds=get_settings().document_events_max_seconds,
+    ))
 
 
 @router.post("/{document_id}/reprocess", response_model=DocumentStatusRead, status_code=status.HTTP_202_ACCEPTED)

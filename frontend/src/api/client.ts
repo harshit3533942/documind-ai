@@ -188,17 +188,42 @@ export async function fetchDocumentFile(id: string): Promise<Blob> {
   return res.blob();
 }
 
-// --- streaming answers (Server-Sent Events) -----------------------------------
+// --- Server-Sent Events --------------------------------------------------------
+// The browser's EventSource only supports GET without custom headers (no
+// Authorization), so streams are read by hand from fetch().body.
+
+/** Yields {event, data} for each SSE event in the response body. Comment lines
+ *  (": ping" heartbeats) are skipped. */
+async function* readSse(res: Response): AsyncGenerator<{ event: string; data: unknown }> {
+  if (!res.body) throw new ApiError(0, "Streaming is not supported by this browser.");
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  for (;;) {
+    const { value, done } = await reader.read();
+    buffer += decoder.decode(value, { stream: !done }).replace(/\r\n/g, "\n");
+    // Events are separated by a blank line; the last piece may be incomplete.
+    const blocks = buffer.split("\n\n");
+    buffer = done ? "" : blocks.pop()!;
+    for (const block of blocks) {
+      let event = "message";
+      let data = "";
+      for (const line of block.split("\n")) {
+        if (line.startsWith("event:")) event = line.slice(6).trim();
+        else if (line.startsWith("data:")) data += line.slice(5).trim();
+      }
+      if (data) yield { event, data: JSON.parse(data) };
+    }
+    if (done) return;
+  }
+}
+
 export interface StreamHandlers {
   onMeta?: (meta: { conversation_id: string; conversation_title: string }) => void;
   onToken: (text: string) => void;
 }
 
-/**
- * POST /chat/stream and read the SSE events as they arrive. Resolves with the
- * final AskResponse (the `done` event). The browser's EventSource only supports
- * GET without headers, so the stream is read by hand from fetch().body.
- */
+/** POST /chat/stream. Resolves with the final AskResponse (the `done` event). */
 export async function askStream(
   question: string, conversationId: string | undefined, documentIds: string[],
   handlers: StreamHandlers, signal?: AbortSignal, regenerate = false,
@@ -214,36 +239,61 @@ export async function askStream(
     }),
   });
   if (!res.ok) throw await parseError(res);
-  if (!res.body) throw new ApiError(0, "Streaming is not supported by this browser.");
-
-  const reader = res.body.getReader();
-  const decoder = new TextDecoder();
-  let buffer = "";
   let result: AskResponse | null = null;
-  for (;;) {
-    const { value, done } = await reader.read();
-    buffer += decoder.decode(value, { stream: !done }).replace(/\r\n/g, "\n");
-    // Events are separated by a blank line; the last piece may be incomplete.
-    const blocks = buffer.split("\n\n");
-    buffer = done ? "" : blocks.pop()!;
-    for (const block of blocks) {
-      let event = "message";
-      let data = "";
-      for (const line of block.split("\n")) {
-        if (line.startsWith("event:")) event = line.slice(6).trim();
-        else if (line.startsWith("data:")) data += line.slice(5).trim();
+  for await (const { event, data } of readSse(res)) {
+    const payload = data as Record<string, string>;
+    if (event === "meta") handlers.onMeta?.(data as { conversation_id: string; conversation_title: string });
+    else if (event === "token") handlers.onToken(payload.text!);
+    else if (event === "done") result = data as AskResponse; // the server closes right after it
+    else if (event === "error") throw new ApiError(500, payload.message!);
+  }
+  if (result) return result;
+  throw new ApiError(0, "The connection closed before the answer was complete.");
+}
+
+/** One live status update of a document (GET /documents/events). */
+export interface DocumentEvent {
+  document_id: string;
+  status: DocumentStatus;
+  pages_done?: number;
+  pages_total?: number;
+  error_message?: string;
+}
+
+/**
+ * Follow the user's document status stream until `signal` aborts. The server
+ * ends each stream after a few minutes and on errors we back off; either way we
+ * reconnect, and every connection starts with a fresh snapshot.
+ * `onLive(false)` = no live updates right now (the caller should poll).
+ */
+export async function watchDocumentEvents(
+  onEvent: (e: DocumentEvent) => void,
+  onLive: (live: boolean) => void,
+  signal: AbortSignal,
+): Promise<void> {
+  let backoff = 1000;
+  while (!signal.aborted) {
+    try {
+      const res = await authFetch("/documents/events", { signal });
+      if (!res.ok) throw await parseError(res);
+      for await (const { event, data } of readSse(res)) {
+        if (event === "snapshot") {
+          const snap = data as { documents: DocumentEvent[]; live: boolean };
+          onLive(snap.live);
+          snap.documents.forEach(onEvent);
+          backoff = 1000;
+        } else if (event === "document") {
+          onEvent(data as DocumentEvent);
+        }
       }
-      if (!data) continue;
-      const payload = JSON.parse(data);
-      if (event === "meta") handlers.onMeta?.(payload);
-      else if (event === "token") handlers.onToken(payload.text);
-      else if (event === "done") result = payload as AskResponse; // the server closes right after it
-      else if (event === "error") throw new ApiError(500, payload.message);
+    } catch (err) {
+      if (signal.aborted) return;
+      onLive(false);
+      if (err instanceof ApiError && err.status === 401) return; // logged out
     }
-    if (done) {
-      if (result) return result;
-      throw new ApiError(0, "The connection closed before the answer was complete.");
-    }
+    if (signal.aborted) return;
+    await new Promise((r) => setTimeout(r, backoff));
+    backoff = Math.min(backoff * 2, 30_000);
   }
 }
 

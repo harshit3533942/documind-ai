@@ -154,11 +154,12 @@ def main() -> int:
         page.get_by_role("link", name="Documents").click()
         expect(page.get_by_text("e2e-handbook.pdf")).to_be_visible()
         expect(page.get_by_text("completed", exact=True)).to_be_visible()
+        expect(page.get_by_text(re.compile("^Live: status updates"))).to_be_visible()  # SSE stream connected
         page.screenshot(path=shots / "05-documents.png")
         page.get_by_role("link", name="Dashboard").click()
         expect(page.get_by_text("1 ready for questions")).to_be_visible()
         page.screenshot(path=shots / "06-dashboard.png")
-        ok("document library shows 'completed'; dashboard shows 1 ready document")
+        ok("document library shows 'completed' with the live status stream; dashboard shows 1 ready document")
 
         # 9. delete the conversation, then the document
         page.get_by_role("link", name="History").click()
