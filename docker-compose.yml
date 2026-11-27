@@ -28,6 +28,7 @@ x-app: &app
     OPENAI_MODEL: ${OPENAI_MODEL:-gpt-4o-mini}
     CORS_ORIGINS: '["http://localhost:${FRONTEND_PORT:-8080}"]'
     HSTS_ENABLED: ${HSTS_ENABLED:-false}
+    OCR_ENABLED: ${OCR_ENABLED:-true}   # Tesseract is installed in the image
   volumes:
     - uploads_data:/app/storage/uploads   # shared by api (writes) and worker (reads)
   depends_on: &app-deps

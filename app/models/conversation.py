@@ -31,4 +31,6 @@ class Conversation(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     __table_args__ = (
         # Conversation sidebar: "my conversations, most recently active first".
         Index("ix_conversations_user_id_updated_at", "user_id", "updated_at"),
+        # Conversation search (ILIKE '%word%'): trigram index, see pg_trgm.
+        Index("ix_conversations_title_trgm", "title", postgresql_using="gin", postgresql_ops={"title": "gin_trgm_ops"}),
     )

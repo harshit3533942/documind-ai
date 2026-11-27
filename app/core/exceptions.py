@@ -68,6 +68,13 @@ class UnprocessableError(AppError):
     code = "unprocessable"
 
 
+class ServiceUnavailableError(AppError):
+    """A dependency (broker, mail server) is down; retrying later can succeed."""
+
+    status_code = status.HTTP_503_SERVICE_UNAVAILABLE
+    code = "service_unavailable"
+
+
 def _safe_validation_errors(exc: RequestValidationError) -> list[dict]:
     """FastAPI's default 422 body echoes the submitted value (`input`) - e.g. the
     password from a failed registration - into responses that browsers, proxies

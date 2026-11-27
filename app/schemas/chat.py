@@ -104,3 +104,16 @@ class ConversationRead(BaseModel):
     message_count: int
     last_message_preview: str | None = None
     last_message_at: datetime | None = None
+    match_snippet: str | None = None  # only when searching: where the query was found
+
+
+class ConversationRename(BaseModel):
+    title: str = Field(min_length=1, max_length=200)
+
+    @field_validator("title")
+    @classmethod
+    def clean_title(cls, v: str) -> str:
+        v = " ".join(v.split())  # also removes newlines / tabs
+        if not v:
+            raise ValueError("Title must not be blank")
+        return v

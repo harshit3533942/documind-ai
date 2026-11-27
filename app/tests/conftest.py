@@ -63,6 +63,7 @@ def db_engine() -> Iterator[Engine]:
     try:
         with engine.begin() as conn:
             conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
+            conn.execute(text("CREATE EXTENSION IF NOT EXISTS pg_trgm"))
     except OperationalError:
         pytest.skip("Test PostgreSQL not reachable - run `docker compose up -d`")
     # Fresh schema for the whole test session.
@@ -99,12 +100,19 @@ class FakeTaskQueue:
 
     def __init__(self) -> None:
         self.enqueued: list[tuple[uuid.UUID, bool]] = []
+        self.summaries: list[uuid.UUID] = []
         self.available = True  # set False to simulate "Redis is down"
 
     def enqueue_document(self, document_id: uuid.UUID, *, force: bool = False) -> bool:
         if not self.available:
             return False
         self.enqueued.append((document_id, force))
+        return True
+
+    def enqueue_summary(self, document_id: uuid.UUID) -> bool:
+        if not self.available:
+            return False
+        self.summaries.append(document_id)
         return True
 
 

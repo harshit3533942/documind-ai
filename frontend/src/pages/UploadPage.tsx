@@ -6,11 +6,18 @@ import { Card, ErrorBanner, PageHeader, ProcessingProgress, StatusBadge, formatB
 import { useDocumentEvents, type Progress } from "../hooks";
 
 const MAX_MB = 20; // matches the backend default MAX_UPLOAD_SIZE_MB (backend enforces it)
+// Formats the backend accepts. DOCX/TXT/MD are converted to PDF on upload.
+const EXTENSIONS = [".pdf", ".docx", ".txt", ".md", ".markdown"];
+const ACCEPT = EXTENSIONS.join(",") + ",application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,text/plain,text/markdown";
+// A folder of 50 files must not open 50 uploads at once: a small queue keeps
+// the browser responsive and stays friendly to the server.
+const MAX_PARALLEL = 3;
 
 interface UploadItem {
   key: string;
   file: File;
   progress: number;
+  waiting?: boolean; // queued in the browser, upload not started yet
   doc?: DocumentItem;
   processing?: Progress; // live "page x of y"
   error?: string;
@@ -20,6 +27,8 @@ export function UploadPage() {
   const [items, setItems] = useState<UploadItem[]>([]);
   const [dragging, setDragging] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
+  const pending = useRef<{ key: string; file: File }[]>([]);
+  const active = useRef(0);
 
   const update = (key: string, patch: Partial<UploadItem>) =>
     setItems((prev) => prev.map((i) => (i.key === key ? { ...i, ...patch } : i)));
@@ -54,23 +63,39 @@ export function UploadPage() {
     window.setTimeout(poll, liveRef.current ? 15_000 : 800);
   };
 
-  const start = (files: FileList | File[]) => {
-    for (const file of Array.from(files)) {
-      const key = `${file.name}-${file.size}-${Date.now()}-${Math.random()}`;
-      // Quick client-side checks for instant feedback; the server re-checks everything.
-      let error: string | undefined;
-      if (!file.name.toLowerCase().endsWith(".pdf")) error = "Only PDF files are allowed.";
-      else if (file.size > MAX_MB * 1024 * 1024) error = `File is larger than ${MAX_MB} MB.`;
-      else if (file.size === 0) error = "The file is empty.";
-      setItems((prev) => [{ key, file, progress: 0, error }, ...prev]);
-      if (error) continue;
+  const pump = () => {
+    while (active.current < MAX_PARALLEL && pending.current.length) {
+      const { key, file } = pending.current.shift()!;
+      active.current += 1;
+      update(key, { waiting: false });
       uploadDocument(file, (p) => update(key, { progress: p }))
         .then((doc) => {
           update(key, { doc, progress: 1 });
           watch(key, doc);
         })
-        .catch((err) => update(key, { error: err instanceof ApiError ? err.message : "Upload failed" }));
+        .catch((err) => update(key, { error: err instanceof ApiError ? err.message : "Upload failed" }))
+        .finally(() => {
+          active.current -= 1;
+          pump();
+        });
     }
+  };
+
+  const start = (files: FileList | File[]) => {
+    const added: UploadItem[] = [];
+    for (const file of Array.from(files)) {
+      const key = `${file.name}-${file.size}-${Date.now()}-${Math.random()}`;
+      // Quick client-side checks for instant feedback; the server re-checks everything.
+      const name = file.name.toLowerCase();
+      let error: string | undefined;
+      if (!EXTENSIONS.some((ext) => name.endsWith(ext))) error = "Only PDF, DOCX, TXT or Markdown files are allowed.";
+      else if (file.size > MAX_MB * 1024 * 1024) error = `File is larger than ${MAX_MB} MB.`;
+      else if (file.size === 0) error = "The file is empty.";
+      added.push({ key, file, progress: 0, error, waiting: !error });
+      if (!error) pending.current.push({ key, file });
+    }
+    setItems((prev) => [...added.reverse(), ...prev]);
+    pump();
   };
 
   const onDrop = (e: DragEvent) => {
@@ -81,7 +106,7 @@ export function UploadPage() {
 
   return (
     <>
-      <PageHeader title="Upload PDFs" subtitle={`PDF only, up to ${MAX_MB} MB each. Text is extracted, chunked and embedded in the background.`} />
+      <PageHeader title="Upload documents" subtitle={`PDF, Word (.docx), text or Markdown, up to ${MAX_MB} MB each. Scanned PDFs are read with OCR. Text is extracted, chunked and embedded in the background.`} />
 
       <div
         onDragOver={(e) => { e.preventDefault(); setDragging(true); }}
@@ -94,7 +119,7 @@ export function UploadPage() {
         <svg className="h-10 w-10 text-brand-600" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5} aria-hidden>
           <path strokeLinecap="round" strokeLinejoin="round" d="M12 16V4m0 0-4 4m4-4 4 4M4 16v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2" />
         </svg>
-        <p className="mt-3 font-medium text-ink">Drag & drop PDFs here</p>
+        <p className="mt-3 font-medium text-ink">Drag & drop files here</p>
         <p className="mt-1 text-sm text-ink-muted">or</p>
         <button
           onClick={() => inputRef.current?.click()}
@@ -103,7 +128,7 @@ export function UploadPage() {
           Choose files
         </button>
         <input
-          ref={inputRef} type="file" accept="application/pdf,.pdf" multiple className="hidden" data-testid="file-input"
+          ref={inputRef} type="file" accept={ACCEPT} multiple className="hidden" data-testid="file-input"
           onChange={(e) => { if (e.target.files) start(e.target.files); e.target.value = ""; }}
         />
       </div>
@@ -118,7 +143,8 @@ export function UploadPage() {
                 {item.doc && <StatusBadge status={item.doc.status} />}
               </div>
               {item.doc?.status === "processing" && item.processing && <ProcessingProgress {...item.processing} />}
-              {!item.error && !item.doc && (
+              {item.waiting && !item.error && <p className="mt-2 text-xs text-ink-soft">Waiting to upload…</p>}
+              {!item.error && !item.doc && !item.waiting && (
                 <div className="mt-2 h-2 overflow-hidden rounded-full bg-slate-100" role="progressbar" aria-valuenow={Math.round(item.progress * 100)}>
                   <div className="h-full rounded-full bg-brand-500 transition-all" style={{ width: `${Math.round(item.progress * 100)}%` }} />
                 </div>

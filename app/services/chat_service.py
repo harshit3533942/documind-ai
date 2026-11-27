@@ -302,8 +302,22 @@ class ChatService:
             raise NotFoundError("Conversation not found")  # also for other users' conversations
         return conversation
 
-    def list_conversations(self, user: User, *, limit: int, offset: int) -> tuple[list[ConversationSummary], int]:
-        return self.conversations.list_for_user(user.id, limit=limit, offset=offset)
+    def list_conversations(
+        self, user: User, *, limit: int, offset: int, query: str | None = None
+    ) -> tuple[list[ConversationSummary], int]:
+        query = " ".join(query.split()) if query else None
+        return self.conversations.list_for_user(user.id, limit=limit, offset=offset, query=query or None)
+
+    def rename_conversation(self, user: User, conversation_id: uuid.UUID, title: str) -> ConversationSummary:
+        conversation = self.get_conversation(user, conversation_id)
+        self.conversations.rename(conversation, title)
+        self.db.commit()
+        logger.info("Conversation %s renamed by user %s", conversation.id, user.id)
+        return self.conversation_summary(user, conversation.id)
+
+    def export_conversation(self, user: User, conversation_id: uuid.UUID) -> tuple[Conversation, list[Message]]:
+        conversation = self.get_conversation(user, conversation_id)
+        return conversation, self.conversations.all_messages(conversation.id)
 
     def conversation_summary(self, user: User, conversation_id: uuid.UUID) -> ConversationSummary:
         conversation = self.get_conversation(user, conversation_id)

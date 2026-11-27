@@ -25,9 +25,10 @@ from app.core.dependencies import get_storage
 from app.core.logging import get_logger
 from app.database.connection import SessionLocal
 from app.models import Document, DocumentStatus
-from app.services import document_events
+from app.services import document_events, summary_service
 from app.services.document_processing_service import DocumentProcessor, mark_queued, stale_document_ids
 from app.services.embedding_service import EmbeddingConfigError, get_embedder
+from app.services.llm_service import get_llm_client
 from app.tasks.celery_app import celery_app
 
 logger = get_logger(__name__)
@@ -41,6 +42,7 @@ UNQUEUED_GRACE_SECONDS = 120
 _session_factory = SessionLocal
 _storage_factory = get_storage
 _embedder_factory = get_embedder
+_llm_factory = get_llm_client
 
 
 def _set_failed(document_id: uuid.UUID, message: str) -> None:
@@ -95,6 +97,8 @@ def process_document_task(self: Any, document_id: str, force: bool = False) -> d
     finally:
         db.close()
 
+    if result.status == "completed":
+        enqueue_summary(doc_id)
     return {
         "document_id": document_id,
         "status": result.status,
@@ -104,6 +108,33 @@ def process_document_task(self: Any, document_id: str, force: bool = False) -> d
         "pages": result.total_pages,
         "error": result.error,
     }
+
+
+def enqueue_summary(document_id: uuid.UUID) -> bool:
+    """Best effort: a lost summary job only means no summary (the user can
+    generate it from the web app); the document itself is ready."""
+    try:
+        summarize_document_task.apply_async(args=[str(document_id)])
+        return True
+    except Exception:  # noqa: BLE001 - broker down
+        logger.warning("Could not enqueue summary for document %s", document_id, exc_info=True)
+        return False
+
+
+@celery_app.task(name="documents.summarize", soft_time_limit=120, time_limit=180)
+def summarize_document_task(document_id: str) -> dict[str, Any]:
+    """Summary + suggested questions for a completed document (see summary_service)."""
+    doc_id = uuid.UUID(document_id)
+    db = _session_factory()
+    try:
+        status = summary_service.summarize_document(db, doc_id, embedder=_embedder_factory(), llm=_llm_factory())
+    except Exception:
+        db.rollback()
+        logger.exception("Summary for document %s failed", doc_id)
+        return {"document_id": document_id, "status": "failed"}
+    finally:
+        db.close()
+    return {"document_id": document_id, "status": status}
 
 
 @celery_app.task(name="documents.requeue_stale")

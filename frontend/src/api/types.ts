@@ -30,12 +30,16 @@ export interface DocumentItem {
   filename: string;
   file_size: number;
   mime_type: string;
+  source_type: "pdf" | "docx" | "txt" | "md"; // the stored file is always a PDF
   status: DocumentStatus;
   total_pages: number | null;
   error_message: string | null;
   created_at: string;
   updated_at: string;
   processed_at: string | null;
+  summary?: string | null; // generated in the background after processing
+  suggested_questions?: string[] | null;
+  summarized_at?: string | null;
 }
 
 export interface Citation {
@@ -82,6 +86,7 @@ export interface Conversation {
   message_count: number;
   last_message_preview: string | null;
   last_message_at: string | null;
+  match_snippet?: string | null; // only when searching
 }
 
 export const ACTIVE_STATUSES: DocumentStatus[] = ["uploaded", "queued", "processing"];

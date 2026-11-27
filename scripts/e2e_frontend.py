@@ -21,7 +21,7 @@ from pathlib import Path
 
 from playwright.sync_api import expect, sync_playwright
 
-from app.tests.pdf_factory import text_pdf
+from app.tests.pdf_factory import docx_file, scanned_pdf, text_pdf
 
 PAGES = [
     "Employee Handbook\n\nAll full-time employees receive 24 days of paid annual leave per year. "
@@ -42,6 +42,13 @@ def main() -> int:
     email = f"e2e-{int(time.time())}@example.com"
     pdf_path = shots / "e2e-handbook.pdf"
     pdf_path.write_bytes(text_pdf(PAGES))
+    # Multi-format upload: Markdown + Word + a scanned (image-only) PDF that needs OCR.
+    md_path = shots / "e2e-notes.md"
+    md_path.write_text("# Team notes\n\nThe **office opens at 9 am** on weekdays.\n\n- Bring your ID card\n", encoding="utf-8")
+    docx_path = shots / "e2e-policy.docx"
+    docx_path.write_bytes(docx_file([("h1", "Travel policy"), ("p", "Hotel stays are reimbursed up to INR 4,000 per night.")]))
+    scan_path = shots / "e2e-scanned.pdf"
+    scan_path.write_bytes(scanned_pdf(["Parking Rules\n\nThe monthly parking fee is INR 300 for every employee."]))
     console_errors: list[str] = []
     server_errors: list[str] = []
     step = 0
@@ -141,7 +148,7 @@ def main() -> int:
         ok("Stop aborts the stream; nothing saved, question restored to the input")
 
         # 7. history page lists the conversation; reopening restores messages
-        page.get_by_role("link", name="History").click()
+        page.get_by_label("Main").get_by_role("link", name="History").click()
         row = page.get_by_text("How many vacation days do I get?").first
         expect(row).to_be_visible()
         expect(page.get_by_text("6 messages")).to_be_visible()
@@ -150,27 +157,88 @@ def main() -> int:
         expect(page.locator("div.rounded-bl-sm")).to_have_count(3)
         ok("history shows the conversation (6 messages); 'Continue' reloads all 3 answers")
 
+        # 7b. search, rename, export
+        page.get_by_label("Main").get_by_role("link", name="History").click()
+        search = page.get_by_label("Search conversations")
+        search.fill("world cup")  # only inside a QUESTION, not the title
+        expect(page.get_by_text(re.compile(r"^Match: .*world cup", re.I))).to_be_visible()
+        search.fill("no such words anywhere")
+        expect(page.get_by_text('No conversations match "no such words anywhere"')).to_be_visible()
+        search.fill("")
+        page.get_by_role("button", name="Rename").first.click()
+        page.get_by_label("Conversation title").fill("Leave questions")
+        page.keyboard.press("Enter")
+        expect(page.get_by_text("Leave questions", exact=True)).to_be_visible()
+        with page.expect_download() as download_info:
+            page.get_by_role("button", name="Export .md").first.click()
+        download = download_info.value
+        exported = Path(download.path()).read_text(encoding="utf-8")
+        assert download.suggested_filename == "documind-leave-questions.md", download.suggested_filename
+        assert exported.startswith("# Leave questions") and "24 days" in exported and "e2e-handbook.pdf" in exported
+        page.reload()
+        expect(page.get_by_text("Leave questions", exact=True)).to_be_visible()
+        ok("search finds text inside messages; rename persists; Markdown export downloads with citations")
+
         # 8. document library + dashboard
-        page.get_by_role("link", name="Documents").click()
+        page.get_by_label("Main").get_by_role("link", name="Documents").click()
         expect(page.get_by_text("e2e-handbook.pdf")).to_be_visible()
         expect(page.get_by_text("completed", exact=True)).to_be_visible()
         expect(page.get_by_text(re.compile("^Live: status updates"))).to_be_visible()  # SSE stream connected
+        details = page.get_by_text("Summary & suggested questions")
+        expect(details).to_be_visible(timeout=60_000)  # written by the worker after processing
+        details.click()
+        first_question = page.locator("details a").first
+        expect(first_question).to_be_visible()
+        suggested = first_question.inner_text()
         page.screenshot(path=shots / "05-documents.png")
-        page.get_by_role("link", name="Dashboard").click()
+        first_question.click()
+        expect(page).to_have_url(re.compile(r"/chat\?doc=.*&q="))
+        expect(page.get_by_label("Your question")).to_have_value(suggested)
+        expect(page.get_by_test_id("document-summary")).to_be_visible()
+        page.get_by_label("Your question").fill("")
+        ok(f"summary generated in the background; suggested question '{suggested}' opens the chat prefilled")
+        page.get_by_label("Main").get_by_role("link", name="Documents").click()
+        page.get_by_label("Main").get_by_role("link", name="Dashboard").click()
         expect(page.get_by_text("1 ready for questions")).to_be_visible()
         page.screenshot(path=shots / "06-dashboard.png")
         ok("document library shows 'completed' with the live status stream; dashboard shows 1 ready document")
 
-        # 9. delete the conversation, then the document
-        page.get_by_role("link", name="History").click()
-        page.once("dialog", lambda d: d.accept())
-        page.get_by_role("button", name="Delete").first.click()
+        # 8b. several files at once: Markdown + DOCX (converted to PDF) + scanned PDF (OCR)
+        page.get_by_label("Main").get_by_role("link", name="Upload").click()
+        page.set_input_files("[data-testid=file-input]", [str(md_path), str(docx_path), str(scan_path)])
+        expect(page.get_by_text("Ready:")).to_have_count(3, timeout=180_000)
+        page.screenshot(path=shots / "06b-multi-upload.png")
+        page.get_by_label("Main").get_by_role("link", name="Documents").click()
+        expect(page.get_by_text("docx", exact=True)).to_be_visible()
+        expect(page.get_by_text("md", exact=True)).to_be_visible()
+        ok("3 files uploaded together: .md and .docx converted, scanned PDF read with OCR - all 'completed'")
+
+        # 8c. the OCR text is searchable
+        page.goto(f"{args.base}/chat")
+        page.get_by_label("Your question").fill("What is the monthly parking fee?")
+        page.keyboard.press("Enter")
+        ocr_answer = page.locator("div.rounded-bl-sm").last
+        expect(ocr_answer).to_contain_text("300", timeout=60_000)
+        expect(ocr_answer).to_contain_text("e2e-scanned.pdf")
+        ok("question answered from the OCR text of the scanned PDF ('INR 300', cited e2e-scanned.pdf)")
+
+        # 9. delete the conversations, then the documents
+        page.get_by_label("Main").get_by_role("link", name="History").click()
+        deletes = page.get_by_role("button", name="Delete")
+        expect(deletes.first).to_be_visible()  # list loaded
+        for remaining in range(deletes.count(), 0, -1):
+            page.once("dialog", lambda d: d.accept())
+            deletes.first.click()
+            expect(deletes).to_have_count(remaining - 1)
         expect(page.get_by_text("No conversations yet")).to_be_visible()
-        page.get_by_role("link", name="Documents").click()
-        page.once("dialog", lambda d: d.accept())
-        page.get_by_role("button", name="Delete").first.click()
+        page.get_by_label("Main").get_by_role("link", name="Documents").click()
+        expect(deletes).to_have_count(4)
+        for remaining in range(4, 0, -1):
+            page.once("dialog", lambda d: d.accept())
+            deletes.first.click()
+            expect(deletes).to_have_count(remaining - 1)
         expect(page.get_by_text("No documents yet")).to_be_visible()
-        ok("deleted conversation and document through the UI")
+        ok("deleted conversations and documents through the UI")
 
         # 10. logout -> protected again
         page.get_by_role("button", name="Log out").click()

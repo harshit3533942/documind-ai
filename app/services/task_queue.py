@@ -17,6 +17,10 @@ class TaskQueue(Protocol):
         """Return True if the job was handed to the broker."""
         ...
 
+    def enqueue_summary(self, document_id: uuid.UUID) -> bool:
+        """Summary + suggested questions of a completed document."""
+        ...
+
 
 class CeleryTaskQueue:
     def enqueue_document(self, document_id: uuid.UUID, *, force: bool = False) -> bool:
@@ -34,3 +38,8 @@ class CeleryTaskQueue:
         except Exception:  # noqa: BLE001 - broker down: the sweeper will pick it up later
             logger.warning("Could not enqueue document %s; it will be retried by the sweeper", document_id, exc_info=True)
             return False
+
+    def enqueue_summary(self, document_id: uuid.UUID) -> bool:
+        from app.tasks.document_tasks import enqueue_summary
+
+        return enqueue_summary(document_id)

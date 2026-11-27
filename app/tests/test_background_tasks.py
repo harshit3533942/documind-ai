@@ -55,6 +55,13 @@ def task_env(monkeypatch, db_session: Session, storage: LocalStorage, embedder: 
     monkeypatch.setattr(document_tasks, "_session_factory", lambda: NoCloseSession(db_session))
     monkeypatch.setattr(document_tasks, "_storage_factory", lambda: storage)
     monkeypatch.setattr(document_tasks, "_embedder_factory", lambda: embedder)
+    monkeypatch.setattr(document_tasks, "_llm_factory", lambda: None)
+    # Never hand a follow-up job to a real broker from a test.
+    monkeypatch.setattr(document_tasks, "enqueue_summary", lambda document_id: summaries_enqueued.append(document_id))
+    summaries_enqueued.clear()
+
+
+summaries_enqueued: list[uuid.UUID] = []
 
 
 @pytest.fixture

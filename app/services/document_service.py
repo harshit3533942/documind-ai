@@ -1,11 +1,12 @@
 """Document upload / listing / deletion business logic.
 
 Upload pipeline (synchronous part - must be fast):
-    1. validate filename extension + declared content type
+    1. validate filename extension (PDF, DOCX, TXT, MD) + declared content type
     2. stream to disk (size limit, SHA-256) under a random server-side name
-    3. magic bytes + open with PyMuPDF (corrupt / encrypted / empty / too many pages)
-    4. reject duplicate (same user, same content hash)
-    5. insert row with status=uploaded
+    3. reject duplicate (same user, same content hash of the ORIGINAL file)
+    4. DOCX/TXT/MD: convert to PDF in place (+ page-text sidecar)
+    5. magic bytes + open with PyMuPDF (corrupt / encrypted / empty / too many pages)
+    6. insert row with status=uploaded
 Text extraction, chunking and embeddings happen later in a background worker.
 """
 
@@ -20,13 +21,14 @@ from app.core.exceptions import (
     ConflictError,
     NotFoundError,
     PayloadTooLargeError,
+    ServiceUnavailableError,
     UnprocessableError,
     UnsupportedMediaTypeError,
 )
 from app.core.logging import get_logger
 from app.models import Document, DocumentChunk, DocumentStatus, User
 from app.repositories.document_repository import DocumentRepository
-from app.services import cache_service, pdf_service
+from app.services import cache_service, conversion_service, pdf_service
 from app.services.document_processing_service import mark_queued
 from app.services.storage_service import EmptyFileError, FileTooLargeError, LocalStorage, StoredFile
 from app.services.task_queue import TaskQueue
@@ -34,8 +36,7 @@ from app.services.task_queue import TaskQueue
 logger = get_logger(__name__)
 
 PDF_MIME = "application/pdf"
-# Some browsers/OSes send generic types for PDFs; the magic-byte check is the real gate.
-ACCEPTED_CONTENT_TYPES = {PDF_MIME, "application/x-pdf", "application/octet-stream", ""}
+UNSUPPORTED_MESSAGE = f"Only {conversion_service.SUPPORTED_LABEL} files are allowed"
 REPROCESSABLE = (DocumentStatus.FAILED, DocumentStatus.COMPLETED)
 
 
@@ -61,10 +62,11 @@ class DocumentService:
         settings = get_settings()
         display_name = sanitize_filename(filename)
 
-        if not display_name.lower().endswith(".pdf"):
-            raise UnsupportedMediaTypeError("Only PDF files are allowed")
-        if (content_type or "").split(";")[0].strip().lower() not in ACCEPTED_CONTENT_TYPES:
-            raise UnsupportedMediaTypeError("Only PDF files are allowed")
+        # Some browsers/OSes send generic content types; the content checks
+        # (magic bytes, parsing) are the real gate.
+        source_type = conversion_service.source_type_for(display_name)
+        if source_type is None or not conversion_service.content_type_ok(source_type, content_type):
+            raise UnsupportedMediaTypeError(UNSUPPORTED_MESSAGE)
 
         try:
             stored = self.storage.save_stream(stream, user.id, settings.max_upload_size_bytes)
@@ -75,9 +77,11 @@ class DocumentService:
 
         # From here on, any failure must remove the file we just wrote.
         try:
-            info = self._validate_pdf(stored)
             if existing := self.documents.find_by_hash(user.id, stored.sha256):
                 raise ConflictError(f"You already uploaded this file as '{existing.filename}' (id {existing.id})")
+            if source_type != "pdf":
+                self._convert(stored, source_type)
+            info = self._validate_pdf(stored)
 
             document = self.documents.add(
                 Document(
@@ -86,6 +90,7 @@ class DocumentService:
                     storage_key=stored.key,
                     file_size=stored.size,
                     mime_type=PDF_MIME,
+                    source_type=source_type,
                     file_hash=stored.sha256,
                     status=DocumentStatus.UPLOADED,
                     total_pages=info.page_count,
@@ -97,7 +102,8 @@ class DocumentService:
             self.storage.delete(stored.key)
             raise
 
-        logger.info("Document uploaded id=%s user=%s pages=%d size=%d", document.id, user.id, info.page_count, stored.size)
+        logger.info("Document uploaded id=%s user=%s type=%s pages=%d size=%d",
+                    document.id, user.id, source_type, info.page_count, stored.size)
         self._enqueue_new(document)
         return document
 
@@ -127,6 +133,24 @@ class DocumentService:
         self.db.refresh(document)
         logger.info("Document %s queued for reprocessing by user %s", document.id, user.id)
         return document
+
+    def request_summary(self, user: User, document_id: uuid.UUID) -> Document:
+        """(Re-)generate the summary of a completed document in the background."""
+        document = self.get(user, document_id)
+        if document.status != DocumentStatus.COMPLETED:
+            raise ConflictError(f"Document is '{document.status.value}'; only processed documents can be summarised")
+        if self.queue is not None and not self.queue.enqueue_summary(document.id):
+            raise ServiceUnavailableError("The background worker is unavailable. Please try again later.")
+        return document
+
+    @staticmethod
+    def _convert(stored: StoredFile, source_type: str) -> None:
+        try:
+            conversion_service.convert_in_place(stored.path, source_type)
+        except conversion_service.UnsupportedFormatError as exc:
+            raise UnsupportedMediaTypeError(exc.message) from None
+        except conversion_service.ConversionError as exc:
+            raise UnprocessableError(exc.message) from None
 
     @staticmethod
     def _validate_pdf(stored: StoredFile) -> pdf_service.PdfInfo:

@@ -1,6 +1,7 @@
 """Unit tests for PDF inspection / extraction and secure storage (no database)."""
 
 import io
+import shutil
 import uuid
 from pathlib import Path
 
@@ -73,6 +74,27 @@ def test_ocr_without_tesseract_degrades_gracefully(tmp_path: Path) -> None:
     """OCR enabled but Tesseract missing -> no crash, just 'no text'."""
     with pytest.raises(pdf_service.NoExtractableTextError):
         pdf_service.extract_text(write(tmp_path, pdf_factory.image_only_pdf(1)), ocr=True)
+
+
+def test_ocr_runs_only_for_image_pages_without_text(tmp_path: Path, monkeypatch) -> None:
+    calls: list[int] = []
+    monkeypatch.setattr(pdf_service, "_ocr_page", lambda page, lang: (calls.append(page.number + 1), "text recognised by ocr")[1])
+    scanned = pdf_service.extract_text(write(tmp_path, pdf_factory.scanned_pdf(["Scanned page text"])), ocr=True)
+    assert calls == [1]
+    assert scanned.pages[0].used_ocr and scanned.pages[0].text == "text recognised by ocr"
+
+    calls.clear()
+    normal = pdf_service.extract_text(write(tmp_path, pdf_factory.text_pdf(["This page has a real text layer."]), "t.pdf"), ocr=True)
+    assert calls == []  # a page with a text layer never pays for OCR
+    assert not normal.pages[0].used_ocr
+
+
+@pytest.mark.skipif(shutil.which("tesseract") is None, reason="Tesseract is not installed (it is in the Docker image)")
+def test_real_ocr_reads_a_scanned_page(tmp_path: Path) -> None:
+    result = pdf_service.extract_text(
+        write(tmp_path, pdf_factory.scanned_pdf(["The monthly parking fee is INR 300."])), ocr=True
+    )
+    assert "parking fee" in result.pages[0].text.lower()
 
 
 def test_iter_pages_is_lazy(tmp_path: Path) -> None:

@@ -160,6 +160,7 @@ export const api = {
   getDocument: (id: string) => request<DocumentItem>(`/documents/${id}`),
   deleteDocument: (id: string) => request<void>(`/documents/${id}`, { method: "DELETE" }),
   reprocessDocument: (id: string) => request<DocumentItem>(`/documents/${id}/reprocess`, { method: "POST" }),
+  requestSummary: (id: string) => request<DocumentItem>(`/documents/${id}/summary`, { method: "POST" }),
 
   // chat & conversations
   ask: (question: string, conversationId?: string, documentIds?: string[]) =>
@@ -171,7 +172,10 @@ export const api = {
         document_ids: documentIds && documentIds.length ? documentIds : null,
       }),
     }),
-  listConversations: (limit = 50, offset = 0) => request<Page<Conversation>>(`/conversations${qs({ limit, offset })}`),
+  listConversations: (limit = 50, offset = 0, q?: string) =>
+    request<Page<Conversation>>(`/conversations${qs({ limit, offset, q: q?.trim() || undefined })}`),
+  renameConversation: (id: string, title: string) =>
+    request<Conversation>(`/conversations/${id}`, { method: "PATCH", body: JSON.stringify({ title }) }),
   getConversation: (id: string) => request<Conversation>(`/conversations/${id}`),
   listMessages: (id: string) => request<Page<Message>>(`/conversations/${id}/messages?limit=200`),
   setFeedback: (conversationId: string, messageId: string, rating: 1 | -1 | null) =>
@@ -180,6 +184,19 @@ export const api = {
     }),
   deleteConversation: (id: string) => request<void>(`/conversations/${id}`, { method: "DELETE" }),
 };
+
+/** Download a conversation as Markdown or JSON (needs the auth header -> Blob -> temporary link). */
+export async function downloadConversation(id: string, format: "markdown" | "json"): Promise<void> {
+  const res = await authFetch(`/conversations/${id}/export${qs({ format })}`);
+  if (!res.ok) throw await parseError(res);
+  const name = /filename="([^"]+)"/.exec(res.headers.get("Content-Disposition") ?? "")?.[1] ?? `conversation.${format === "json" ? "json" : "md"}`;
+  const url = URL.createObjectURL(await res.blob());
+  const link = Object.assign(document.createElement("a"), { href: url, download: name });
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
 
 /** The original uploaded file (needs the auth header, so it is fetched as a Blob). */
 export async function fetchDocumentFile(id: string): Promise<Blob> {

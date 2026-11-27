@@ -51,6 +51,12 @@ class StoredFile:
     path: Path
 
 
+def sidecar_path(pdf_path: Path) -> Path:
+    """Page-text file stored next to a PDF converted from DOCX/TXT/MD
+    (see conversion_service). Derived from the validated PDF path, never from input."""
+    return pdf_path.with_name(pdf_path.stem + ".pages.json")
+
+
 class LocalStorage:
     def __init__(self, root: Path) -> None:
         self.root = root.resolve()
@@ -88,9 +94,12 @@ class LocalStorage:
         return path
 
     def delete(self, key: str) -> bool:
-        """Delete a stored file. Returns False if it was already gone."""
+        """Delete a stored file (and its page-text sidecar, if any).
+        Returns False if it was already gone."""
+        path = self.path_for(key)
+        sidecar_path(path).unlink(missing_ok=True)
         try:
-            self.path_for(key).unlink()
+            path.unlink()
             return True
         except FileNotFoundError:
             return False

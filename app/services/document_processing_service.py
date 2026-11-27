@@ -33,7 +33,7 @@ from sqlalchemy.orm import Session
 from app.core.config import get_settings
 from app.core.logging import get_logger
 from app.models import Document, DocumentChunk, DocumentStatus
-from app.services import cache_service, document_events, pdf_service
+from app.services import cache_service, conversion_service, document_events, pdf_service
 from app.services.chunking_service import ChunkingConfig, TextChunk, TextChunker
 from app.services.embedding_service import Embedder, EmbeddingConfigError, get_embedder
 from app.services.storage_service import LocalStorage, StorageError
@@ -180,9 +180,21 @@ class DocumentProcessor:
         result = ProcessingResult(document.id, status="completed")
         total_chars = 0
 
+        def source_pages():
+            if document.source_type == "pdf":
+                yield from pdf_service.iter_pages(path)
+                return
+            # Converted DOCX/TXT/MD: the exact original text per page (sidecar),
+            # not the lossy text layer of the generated PDF.
+            try:
+                for number, text in conversion_service.iter_sidecar_pages(path):
+                    yield pdf_service.PageText(page_number=number, text=pdf_service.clean_text(text))
+            except (OSError, ValueError, KeyError):
+                raise PermanentProcessingError("The converted text of this document is missing. Please upload it again.") from None
+
         def pages():  # tracks page stats while streaming pages into the chunker
             nonlocal total_chars
-            for page in pdf_service.iter_pages(path):
+            for page in source_pages():
                 result.total_pages = page.page_number
                 if progress is not None:
                     progress.page_done(page.page_number)

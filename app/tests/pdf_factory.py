@@ -51,3 +51,42 @@ def encrypted_pdf(user_password: str = "secret") -> bytes:
 def corrupt_pdf() -> bytes:
     """Has a valid PDF header, but the rest is garbage."""
     return b"%PDF-1.7\n" + b"\x00garbage-not-a-real-pdf-structure\xff" * 50
+
+
+def scanned_pdf(pages: list[str], dpi: int = 200) -> bytes:
+    """A realistic scan: each page is only a PICTURE of text (no text layer) -
+    readable by OCR, invisible to normal text extraction."""
+    source = pymupdf.open("pdf", text_pdf(pages, fontsize=14))
+    doc = pymupdf.open()
+    for page in source:
+        pix = page.get_pixmap(dpi=dpi, colorspace=pymupdf.csGRAY)
+        doc.new_page(width=page.rect.width, height=page.rect.height).insert_image(page.rect, pixmap=pix)
+    data = doc.tobytes(deflate=True)
+    doc.close()
+    source.close()
+    return data
+
+
+def docx_file(blocks: list[tuple[str, str]]) -> bytes:
+    """A real .docx. blocks: ("h1"|"p"|"li", text) or ("table", "a|b;c|d")."""
+    import io
+
+    import docx
+
+    document = docx.Document()
+    for kind, text in blocks:
+        if kind == "h1":
+            document.add_heading(text, level=1)
+        elif kind == "li":
+            document.add_paragraph(text, style="List Bullet")
+        elif kind == "table":
+            rows = [r.split("|") for r in text.split(";")]
+            table = document.add_table(rows=len(rows), cols=len(rows[0]))
+            for r, row in enumerate(rows):
+                for c, value in enumerate(row):
+                    table.cell(r, c).text = value
+        else:
+            document.add_paragraph(text)
+    buffer = io.BytesIO()
+    document.save(buffer)
+    return buffer.getvalue()

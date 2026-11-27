@@ -79,6 +79,19 @@ def reprocess_document(
     return DocumentStatusRead.model_validate(DocumentService(db, storage, queue).reprocess(user, document_id))
 
 
+@router.post(
+    "/{document_id}/summary", response_model=DocumentRead, status_code=status.HTTP_202_ACCEPTED,
+    dependencies=[Depends(limit_by_user("summary", "rate_limit_upload_per_user", 3600))],
+)
+def request_document_summary(
+    document_id: uuid.UUID, user: CurrentUser, db: DbSession, storage: Storage, queue: Queue
+) -> DocumentRead:
+    """(Re-)generate the summary and suggested questions of a processed document.
+    They are created automatically after processing; this is for older documents
+    or a fresh version. 202: it happens in the background (watch /documents/events)."""
+    return DocumentRead.model_validate(DocumentService(db, storage, queue).request_summary(user, document_id))
+
+
 @router.get("", response_model=Page[DocumentRead])
 def list_documents(
     user: CurrentUser,

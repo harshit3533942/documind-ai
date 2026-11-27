@@ -108,7 +108,7 @@ export function ChatPage() {
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [documents, setDocuments] = useState<DocumentItem[]>([]);
   const [selected, setSelected] = useState<string[]>(() => (searchParams.get("doc") ? [searchParams.get("doc")!] : []));
-  const [question, setQuestion] = useState("");
+  const [question, setQuestion] = useState(() => searchParams.get("q") ?? ""); // ?q= prefills (e.g. a suggested question)
   const [loadingHistory, setLoadingHistory] = useState(false);
   const [sending, setSending] = useState(false);
   const [streaming, setStreaming] = useState(false); // first token has arrived
@@ -270,6 +270,14 @@ export function ChatPage() {
   };
   const toggle = (id: string) => setSelected((s) => (s.includes(id) ? s.filter((x) => x !== id) : [...s, id]));
 
+  // Starter questions generated for the documents in scope (fallback: generic ones).
+  const inScope = selected.length ? documents.filter((d) => selected.includes(d.id)) : documents;
+  const focused = inScope.length === 1 ? inScope[0] : undefined;
+  const generated = focused
+    ? focused.suggested_questions ?? []
+    : inScope.flatMap((d) => (d.suggested_questions ?? []).slice(0, 2)).slice(0, 4);
+  const starters = generated.length ? generated : SUGGESTIONS;
+
   return (
     <div className="grid gap-6 lg:grid-cols-[280px_1fr]">
       {/* Sidebar: conversations + document selection */}
@@ -325,10 +333,18 @@ export function ChatPage() {
             {loadingHistory && <Spinner label="Loading conversation…" />}
             {!loadingHistory && messages.length === 0 && (
               <div className="py-12 text-center">
-                <h2 className="text-lg font-semibold text-ink">Ask anything about your documents</h2>
-                <p className="mt-1 text-sm text-ink-muted">Answers come only from your PDFs, with page references you can check.</p>
-                <div className="mt-5 flex flex-wrap justify-center gap-2">
-                  {SUGGESTIONS.map((s) => (
+                <h2 className="text-lg font-semibold text-ink">
+                  {focused ? `Ask about ${focused.filename}` : "Ask anything about your documents"}
+                </h2>
+                <p className="mt-1 text-sm text-ink-muted">Answers come only from your documents, with page references you can check.</p>
+                {focused?.summary && (
+                  <div className="mx-auto mt-4 max-w-2xl rounded-lg border border-slate-200 bg-slate-50 px-4 py-3 text-left text-sm text-ink" data-testid="document-summary">
+                    <p className="text-xs font-semibold uppercase tracking-wide text-ink-soft">Summary</p>
+                    <p className="mt-1">{focused.summary}</p>
+                  </div>
+                )}
+                <div className="mt-5 flex flex-wrap justify-center gap-2" aria-label="Suggested questions">
+                  {starters.map((s) => (
                     <button key={s} onClick={() => void send(s)} className="rounded-full border border-brand-200 bg-brand-50 px-3 py-1.5 text-sm text-brand-800 hover:bg-brand-100">{s}</button>
                   ))}
                 </div>

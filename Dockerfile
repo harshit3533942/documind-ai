@@ -10,11 +10,21 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
-# 1) Dependencies first (cached layer: only rebuilt when requirements change).
-#    torch from the CPU index: the default Linux wheel bundles ~2 GB of CUDA.
+# 0) Tesseract for OCR of scanned PDFs (OCR_ENABLED). PyMuPDF calls it for
+#    pages without a text layer. TESSDATA_PREFIX tells it where the language
+#    files are (the versioned Debian path is linked to a stable one).
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends tesseract-ocr tesseract-ocr-eng \
+ && rm -rf /var/lib/apt/lists/* \
+ && ln -s "$(dirname "$(find /usr/share/tesseract-ocr -name eng.traineddata | head -n1)")" /usr/share/tessdata
+ENV TESSDATA_PREFIX=/usr/share/tessdata
+
+# 1) Dependencies first (cached layers). torch gets its OWN layer: it is the
+#    biggest download and rarely changes, so editing requirements.txt does not
+#    re-download it. CPU index: the default Linux wheel bundles ~2 GB of CUDA.
+RUN pip install torch==2.15.0 --index-url https://download.pytorch.org/whl/cpu
 COPY requirements.txt .
-RUN pip install torch==2.15.0 --index-url https://download.pytorch.org/whl/cpu \
- && pip install -r requirements.txt
+RUN pip install -r requirements.txt
 
 # 2) Bake the embedding model into the image: no download at container start,
 #    works without internet, and every container uses the identical model.

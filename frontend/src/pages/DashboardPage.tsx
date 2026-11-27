@@ -39,7 +39,7 @@ export function DashboardPage() {
           <p className="text-sm text-ink-muted">Quick actions</p>
           <div className="flex flex-wrap gap-2">
             <Link to="/chat" className="rounded-lg border border-brand-600 bg-brand-50 px-3 py-1.5 text-sm font-medium text-brand-800 hover:bg-brand-100">Ask a question</Link>
-            <Link to="/upload" className="rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-sm font-medium text-ink hover:bg-slate-50">Upload PDF</Link>
+            <Link to="/upload" className="rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-sm font-medium text-ink hover:bg-slate-50">Upload</Link>
           </div>
         </Card>
       </div>

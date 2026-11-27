@@ -108,7 +108,7 @@ export function RegisterPage() {
   };
 
   return (
-    <AuthShell title="Create your account" subtitle="Upload PDFs and get answers with page citations.">
+    <AuthShell title="Create your account" subtitle="Upload documents and get answers with page citations.">
       <form onSubmit={submit} className="space-y-4">
         <ErrorBanner message={error} />
         <Field label="Name">

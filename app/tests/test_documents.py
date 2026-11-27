@@ -73,7 +73,7 @@ def test_upload_filename_path_traversal_is_neutralised(client: TestClient, alice
 @pytest.mark.parametrize(
     ("name", "content_type", "data", "expected"),
     [
-        ("notes.txt", "text/plain", b"plain text", 415),                           # wrong extension
+        ("photo.png", "image/png", b"\x89PNG\r\n", 415),                            # unsupported extension
         ("fake.pdf", "application/pdf", b"MZ\x90 this is an exe", 415),            # wrong magic bytes
         ("report.pdf", "image/png", pdf_factory.text_pdf(["x"]), 415),             # wrong content type
         ("empty.pdf", "application/pdf", b"", 422),                                # zero bytes

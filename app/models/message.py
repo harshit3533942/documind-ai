@@ -41,5 +41,9 @@ class Message(UUIDPrimaryKeyMixin, CreatedAtMixin, Base):
     __table_args__ = (
         # Load a conversation's messages in chronological order.
         Index("ix_messages_conversation_id_created_at", "conversation_id", "created_at"),
+        # Conversation search inside messages (ILIKE '%word%'). A B-tree index
+        # cannot serve a leading wildcard; a pg_trgm GIN index can: it indexes
+        # every 3-letter sequence, so '%leave%' looks up 'lea','eav','ave'.
+        Index("ix_messages_content_trgm", "content", postgresql_using="gin", postgresql_ops={"content": "gin_trgm_ops"}),
         CheckConstraint("feedback IS NULL OR feedback IN (-1, 1)", name="feedback_valid"),
     )
