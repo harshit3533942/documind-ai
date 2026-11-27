@@ -25,6 +25,18 @@ os.environ["RAG_RERANK_ENABLED"] = "false"
 # elsewhere a similar-looking question must get its own answer.
 os.environ["SEMANTIC_CACHE_ENABLED"] = "false"
 
+# Hermetic settings: the app's Settings must NOT read the developer's .env
+# during tests - CI has no .env, and a test about "unconfigured" defaults
+# (e.g. the production guard) must see the real defaults, not whatever this
+# machine happens to configure. Only the test database location is taken from
+# .env (below), explicitly.
+from dotenv import dotenv_values  # noqa: E402
+
+from app.core.config import BASE_DIR, Settings  # noqa: E402  (config has no app imports)
+
+_DOTENV = dotenv_values(BASE_DIR / ".env")
+Settings.model_config["env_file"] = None
+
 import uuid  # noqa: E402
 from collections.abc import Callable, Iterator  # noqa: E402
 from pathlib import Path  # noqa: E402
@@ -54,10 +66,20 @@ from app.models import User, UserRole  # noqa: E402
 
 TEST_PASSWORD = "Str0ngPassw0rd"
 
-TEST_DATABASE_URL = os.getenv(
-    "TEST_DATABASE_URL",
-    "postgresql+psycopg://documind:documind_dev_password@localhost:5432/documind_test",
-)
+def _test_database_url() -> str:
+    """TEST_DATABASE_URL (environment or .env); otherwise the configured
+    DATABASE_URL - same server and credentials - with the separate
+    documind_test database. No password is hard-coded here."""
+    from sqlalchemy.engine import make_url
+
+    if explicit := os.getenv("TEST_DATABASE_URL") or _DOTENV.get("TEST_DATABASE_URL"):
+        return explicit
+    configured = (os.getenv("DATABASE_URL") or _DOTENV.get("DATABASE_URL")
+                  or Settings.model_fields["database_url"].default)
+    return make_url(configured).set(database="documind_test").render_as_string(hide_password=False)
+
+
+TEST_DATABASE_URL = _test_database_url()
 
 
 @pytest.fixture(scope="session")

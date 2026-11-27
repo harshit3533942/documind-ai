@@ -54,7 +54,7 @@ Prerequisite: Docker Desktop.
 
 ```powershell
 copy .env.example .env
-python -c "import secrets; print(secrets.token_urlsafe(64))"   # put this into JWT_SECRET_KEY in .env
+python -c "import secrets; print(secrets.token_urlsafe(64))"   # run 3x: JWT_SECRET_KEY, POSTGRES_PASSWORD (+ in DATABASE_URL), GRAFANA_ADMIN_PASSWORD
 docker compose up -d --build
 ```
 
@@ -113,7 +113,7 @@ CI (GitHub Actions) runs migrations, the full suite with a 90 % coverage gate, a
 ## Configuration
 
 All settings come from environment variables / `.env` — see [.env.example](.env.example).
-Most important: `JWT_SECRET_KEY` (required), `POSTGRES_PASSWORD`, `OPENAI_API_KEY`
+Required, no defaults: `JWT_SECRET_KEY`, `POSTGRES_PASSWORD`, `GRAFANA_ADMIN_PASSWORD` (generate each with `python -c "import secrets; print(secrets.token_urlsafe(32))"`). Optional: `OPENAI_API_KEY`
 (optional), `ENVIRONMENT=production` (enables startup safety checks).
 
 ## Performance (local laptop, CPU)

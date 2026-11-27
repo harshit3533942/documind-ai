@@ -68,7 +68,8 @@ Set in `.env` (Compose reads it automatically). See `.env.example` for all optio
 | Variable | Default | Notes |
 |---|---|---|
 | `JWT_SECRET_KEY` | **required** | ≥ 32 random characters |
-| `POSTGRES_PASSWORD` | dev password | **Change for any shared/production deployment** (startup refuses the dev password when `ENVIRONMENT=production`) |
+| `POSTGRES_PASSWORD` | **none — required** | Random value (`python -c "import secrets; print(secrets.token_urlsafe(32))"`), also inside `DATABASE_URL` for local runs. docker-compose refuses to start without it; with `ENVIRONMENT=production` the app also refuses any password published in this repo (dev/CI) or a well-known default |
+| `GRAFANA_ADMIN_PASSWORD` | **none — required** | Random value; Grafana keeps the first one in its volume, so to change it later run `docker compose exec grafana grafana cli admin reset-admin-password --password-from-stdin` |
 | `ENVIRONMENT` | `development` | `production` enables startup safety checks and hides `/docs` |
 | `OPENAI_API_KEY` / `OPENAI_BASE_URL` / `OPENAI_MODEL` | empty | Enable LLM answers; without a key, answers are extractive |
 | `WORKER_CONCURRENCY` | `1` | Each worker process loads the model (~0.7 GB RAM) |

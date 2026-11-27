@@ -13,6 +13,38 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 BASE_DIR = Path(__file__).resolve().parent.parent.parent
 
+# Passwords that ship with this repo (docker-compose / .env.example) or that
+# are well-known defaults. None of them may ever reach production.
+DEV_DATABASE_PASSWORD = "documind_dev_password"
+# Every password written into this repository (local default, CI) is public
+# the moment the code is pushed - none of them may be used in production.
+REPOSITORY_DATABASE_PASSWORDS = frozenset({DEV_DATABASE_PASSWORD, "documind_ci_password"})
+WEAK_DATABASE_PASSWORDS = frozenset({
+    "documind", "postgres", "password", "admin", "root", "secret", "changeme", "change_me", "change-me",
+})
+
+
+def _database_password_problem(database_url: str) -> str | None:
+    """Why the password in DATABASE_URL is unacceptable for production, or None.
+
+    The URL is PARSED (not substring-searched): a percent-encoded password
+    ("documind%5Fdev%5Fpassword") or a different casing is still caught, and a
+    missing password is reported instead of silently accepted."""
+    from sqlalchemy.engine import make_url
+    from sqlalchemy.exc import ArgumentError
+
+    try:
+        password = make_url(database_url).password
+    except ArgumentError:
+        return "DATABASE_URL is not a valid database URL"
+    if not password:
+        return "DATABASE_URL has no database password"
+    if password.lower() in REPOSITORY_DATABASE_PASSWORDS:
+        return "DATABASE_URL uses the development password (published in this repository)"
+    if password.lower() in WEAK_DATABASE_PASSWORDS:
+        return "DATABASE_URL uses a well-known default password"
+    return None
+
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
@@ -173,8 +205,8 @@ class Settings(BaseSettings):
         """Refuse to START in production with development defaults - a
         misconfiguration should fail loudly at deploy time, not be exploited later."""
         problems = []
-        if "documind_dev_password" in self.database_url:
-            problems.append("DATABASE_URL uses the development password")
+        if problem := _database_password_problem(self.database_url):
+            problems.append(problem)
         if self.debug:
             problems.append("DEBUG must be false")
         if "*" in self.cors_origins:
@@ -191,7 +223,7 @@ class Settings(BaseSettings):
 
     # --- Database ---
     # Local dev default matches docker-compose.yml. Override in .env / production.
-    database_url: str = "postgresql+psycopg://documind:documind_dev_password@localhost:5432/documind"
+    database_url: str = f"postgresql+psycopg://documind:{DEV_DATABASE_PASSWORD}@localhost:5432/documind"
     db_pool_size: int = 5
     db_max_overflow: int = 10
     db_pool_timeout: int = 30

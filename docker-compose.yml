@@ -8,7 +8,10 @@
 #   Stop:            docker compose down                  (data is kept in volumes)
 #   Reset ALL data:  docker compose down -v               (DELETES database, uploads)
 #
-# Required in .env: JWT_SECRET_KEY. Optional: POSTGRES_PASSWORD, OPENAI_API_KEY, ...
+# Required in .env (no insecure defaults): JWT_SECRET_KEY, POSTGRES_PASSWORD,
+# GRAFANA_ADMIN_PASSWORD. Generate each with:
+#   python -c "import secrets; print(secrets.token_urlsafe(32))"
+# Optional: OPENAI_API_KEY, SMTP_*, METRICS_TOKEN, ...
 # See docs/deployment.md.
 
 name: documindai   # pinned: existing volumes are named documindai_*
@@ -21,7 +24,7 @@ x-app: &app
   environment: &app-env
     ENVIRONMENT: ${ENVIRONMENT:-development}
     LOG_LEVEL: ${LOG_LEVEL:-INFO}
-    DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-documind}:${POSTGRES_PASSWORD:-documind_dev_password}@postgres:5432/${POSTGRES_DB:-documind}
+    DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-documind}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set in .env - see .env.example}@postgres:5432/${POSTGRES_DB:-documind}
     REDIS_URL: redis://redis:6379/0
     JWT_SECRET_KEY: ${JWT_SECRET_KEY:?JWT_SECRET_KEY must be set in .env}
     LLM_PROVIDER: ${LLM_PROVIDER:-auto}
@@ -60,7 +63,7 @@ services:
     restart: unless-stopped
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-documind}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-documind_dev_password}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set in .env - see .env.example}
       POSTGRES_DB: ${POSTGRES_DB:-documind}
     ports:
       - "127.0.0.1:5432:5432"   # localhost only (for local development / tests)
@@ -183,7 +186,7 @@ services:
     restart: unless-stopped
     environment:
       GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
-      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:?GRAFANA_ADMIN_PASSWORD must be set in .env - see .env.example}
       GF_USERS_ALLOW_SIGN_UP: "false"
       GF_ANALYTICS_REPORTING_ENABLED: "false"
       GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/documind.json

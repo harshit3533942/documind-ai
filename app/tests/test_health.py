@@ -43,9 +43,19 @@ def test_readiness_503_when_a_dependency_is_down(monkeypatch: pytest.MonkeyPatch
     assert response.json()["status"] == "degraded"
 
 
-def test_readiness_against_real_services() -> None:
-    """Integration: PostgreSQL and Redis from docker-compose."""
-    body = client.get("/health/ready").json()
+def test_readiness_against_real_services(monkeypatch) -> None:
+    """Integration: PostgreSQL (the test database) and Redis from docker-compose."""
+    from sqlalchemy import create_engine
+
+    from app.database import connection
+    from app.tests.conftest import TEST_DATABASE_URL
+
+    engine = create_engine(TEST_DATABASE_URL, connect_args={"connect_timeout": 3})
+    monkeypatch.setattr(connection, "engine", engine)
+    try:
+        body = client.get("/health/ready").json()
+    finally:
+        engine.dispose()
     if body["status"] != "ok":
         pytest.skip(f"services not running: {body['checks']}")
     assert body["checks"]["database"]["pgvector"]
