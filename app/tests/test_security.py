@@ -81,7 +81,8 @@ def test_docs_default_off_in_production() -> None:
 @pytest.mark.parametrize(
     ("overrides", "problem"),
     [
-        ({}, "development password"),
+        ({"database_url": Settings.model_fields["database_url"].default},
+         "development password"),
         ({"database_url": "postgresql+psycopg://app:S3cure@db/x", "debug": True}, "DEBUG"),
         ({"database_url": "postgresql+psycopg://app:S3cure@db/x", "cors_origins": ["*"]}, "CORS_ORIGINS"),
         ({"database_url": "postgresql+psycopg://app:S3cure@db/x",
