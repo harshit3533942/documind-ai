@@ -3,6 +3,7 @@ middleware and admin metrics. Uses the per-test fake Redis from conftest."""
 
 import uuid
 from collections.abc import Callable
+from types import SimpleNamespace
 
 import pytest
 from fastapi.testclient import TestClient
@@ -45,6 +46,11 @@ class BrokenRedis:
 def limits_on(monkeypatch: pytest.MonkeyPatch) -> Callable[..., None]:
     def _set(**limits: int) -> None:
         monkeypatch.setattr(get_settings(), "rate_limit_enabled", True)
+        # Freeze the limiter's clock 20 s into a window: with the real clock a
+        # slow test could cross a minute boundary, the counter would reset and
+        # the expected 429 would never come (flaky). Only rate_limit's own
+        # reference to `time` is replaced, not the global module.
+        monkeypatch.setattr(rate_limit, "time", SimpleNamespace(time=lambda: 60 * 16_667 + 20.0))
         for name, value in limits.items():
             monkeypatch.setattr(get_settings(), name, value)
     return _set
@@ -121,7 +127,7 @@ def test_upload_rate_limit_per_user(client, create_user, auth_headers, limits_on
 def test_fixed_window_resets(monkeypatch, limits_on) -> None:
     limits_on()
     now = [60 * 16_667 + 20.0]  # exactly 20 s into a 60 s window
-    monkeypatch.setattr(rate_limit.time, "time", lambda: now[0])
+    monkeypatch.setattr(rate_limit, "time", SimpleNamespace(time=lambda: now[0]))
     assert rate_limit.hit("t", "id", limit=1, window_seconds=60).allowed
     second = rate_limit.hit("t", "id", limit=1, window_seconds=60)
     assert not second.allowed and second.retry_after == 40

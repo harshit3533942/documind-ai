@@ -5,6 +5,7 @@ from app.models.document import Document
 from app.models.document_chunk import DocumentChunk
 from app.models.enums import DocumentStatus, MessageRole, UserRole
 from app.models.message import Message
+from app.models.refresh_token import RefreshToken
 from app.models.user import User
 
 __all__ = [
@@ -14,6 +15,7 @@ __all__ = [
     "DocumentStatus",
     "Message",
     "MessageRole",
+    "RefreshToken",
     "User",
     "UserRole",
 ]

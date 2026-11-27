@@ -2,7 +2,7 @@
 
 Revision ID: c3f1a9d2e4b7
 Revises: 546fea95f2d8
-Create Date: 2026-11-27 10:00:00.000000
+Create Date: 2026-11-27 00:45:00.000000
 
 A STORED generated column: PostgreSQL fills it for every existing row during
 this migration and keeps it in sync on every insert/update afterwards.

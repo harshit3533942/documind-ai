@@ -24,7 +24,7 @@ celery_app = Celery(
     "documind",
     broker=settings.broker_url,
     backend=settings.result_backend,
-    include=["app.tasks.document_tasks"],
+    include=["app.tasks.document_tasks", "app.tasks.maintenance_tasks"],
 )
 
 celery_app.conf.update(
@@ -62,6 +62,11 @@ celery_app.conf.update(
         "requeue-stale-documents": {
             "task": "documents.requeue_stale",
             "schedule": 300.0,  # every 5 minutes
+        },
+        "purge-refresh-tokens": {
+            "task": "maintenance.purge_refresh_tokens",
+            "schedule": 24 * 3600.0,  # daily
+            "options": {"queue": "documents"},
         },
     },
 )

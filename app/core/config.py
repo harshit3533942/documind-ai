@@ -204,7 +204,22 @@ class Settings(BaseSettings):
     jwt_secret_key: SecretStr = Field(min_length=32)
     jwt_algorithm: Literal["HS256", "HS384", "HS512"] = "HS256"
     jwt_issuer: str = "documind-ai"
-    access_token_expire_minutes: int = Field(default=60, ge=1, le=24 * 60)
+    # Short-lived access token (kept only in memory by the web app) + a
+    # long-lived, rotating refresh token in an httpOnly cookie.
+    access_token_expire_minutes: int = Field(default=15, ge=1, le=24 * 60)
+    refresh_token_expire_days: int = Field(default=14, ge=1, le=365)
+    refresh_cookie_name: str = "documind_refresh"
+    # Secure cookies are only sent over HTTPS. Default: on in production.
+    refresh_cookie_secure: bool | None = None
+    # Two browser tabs may refresh at the same moment with the same token: a
+    # second use within this window is a race, not token theft.
+    refresh_reuse_grace_seconds: int = Field(default=10, ge=0, le=300)
+
+    @property
+    def refresh_cookie_secure_effective(self) -> bool:
+        if self.refresh_cookie_secure is not None:
+            return self.refresh_cookie_secure
+        return self.environment == "production"
 
     # --- Embeddings ---
     # Must match the model: all-MiniLM-L6-v2 -> 384 dims.

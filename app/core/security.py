@@ -6,6 +6,8 @@ GPUs. Each hash contains its own random salt + parameters, e.g.
     $argon2id$v=19$m=65536,t=3,p=4$<salt>$<hash>
 """
 
+import hashlib
+import secrets
 import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -64,6 +66,20 @@ def create_access_token(subject: uuid.UUID, role: str, expires_minutes: int | No
         "jti": uuid.uuid4().hex,  # unique token id (enables a revocation list later)
     }
     return jwt.encode(payload, settings.jwt_secret_key.get_secret_value(), algorithm=settings.jwt_algorithm)
+
+
+# ---------------------------------------------------------------- refresh tokens
+def new_refresh_token() -> tuple[str, str]:
+    """(raw token for the client, SHA-256 hash for the database).
+
+    Opaque random string, not a JWT: it is only ever checked against the
+    database, so it needs no signature - and it can be revoked."""
+    raw = secrets.token_urlsafe(32)  # 256 bits of randomness
+    return raw, hash_refresh_token(raw)
+
+
+def hash_refresh_token(raw: str) -> str:
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
 def decode_access_token(token: str) -> dict[str, Any]:
