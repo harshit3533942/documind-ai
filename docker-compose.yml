@@ -29,6 +29,17 @@ x-app: &app
     CORS_ORIGINS: '["http://localhost:${FRONTEND_PORT:-8080}"]'
     HSTS_ENABLED: ${HSTS_ENABLED:-false}
     OCR_ENABLED: ${OCR_ENABLED:-true}   # Tesseract is installed in the image
+    # Email: Mailpit catches every email locally (inbox: http://localhost:8025).
+    # For real delivery set EMAIL_BACKEND/SMTP_* to a provider in .env.
+    EMAIL_BACKEND: ${EMAIL_BACKEND:-smtp}
+    SMTP_HOST: ${SMTP_HOST:-mailpit}
+    SMTP_PORT: ${SMTP_PORT:-1025}
+    SMTP_USERNAME: ${SMTP_USERNAME:-}
+    SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+    SMTP_STARTTLS: ${SMTP_STARTTLS:-false}
+    EMAIL_FROM: ${EMAIL_FROM:-DocuMind AI <no-reply@documind.local>}
+    FRONTEND_BASE_URL: ${FRONTEND_BASE_URL:-http://localhost:8080}
+    REQUIRE_EMAIL_VERIFICATION: ${REQUIRE_EMAIL_VERIFICATION:-false}
   volumes:
     - uploads_data:/app/storage/uploads   # shared by api (writes) and worker (reads)
   depends_on: &app-deps
@@ -73,6 +84,17 @@ services:
       interval: 5s
       timeout: 3s
       retries: 10
+
+  # Local mail catcher: accepts SMTP on 1025 and shows every email in a web
+  # inbox on http://localhost:8025. Nothing is delivered to real addresses.
+  mailpit:
+    image: axllent/mailpit:v1.21
+    container_name: documind-mailpit
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8025:8025"   # web inbox + API (localhost only)
+    environment:
+      MP_MAX_MESSAGES: 500
 
   # ------------------------------------------------------------ backend
   migrate:

@@ -22,18 +22,20 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
-from app.core.exceptions import ConflictError, UnauthorizedError
+from app.core.exceptions import ConflictError, PermissionDeniedError, UnauthorizedError, UnprocessableError
 from app.core.logging import get_logger
 from app.core.security import (
     burn_verification_time,
     create_access_token,
+    hash_email_token,
     hash_password,
     hash_refresh_token,
+    new_email_token,
     new_refresh_token,
     password_needs_rehash,
     verify_password,
 )
-from app.models import RefreshToken, User
+from app.models import RefreshToken, TokenPurpose, User, UserToken
 from app.repositories.user_repository import UserRepository
 from app.schemas.auth import Token
 from app.schemas.user import UserCreate
@@ -42,6 +44,8 @@ logger = get_logger(__name__)
 
 INVALID_CREDENTIALS = "Incorrect email or password"
 INVALID_SESSION = "Session expired. Please log in again."
+INVALID_LINK = "This link is invalid or has expired. Please request a new one."
+EMAIL_NOT_VERIFIED = "Please confirm your email address first - check your inbox for the link."
 
 
 class AuthService:
@@ -77,6 +81,10 @@ class AuthService:
             raise UnauthorizedError(INVALID_CREDENTIALS)
         if not user.is_active:
             raise UnauthorizedError("Account is disabled")
+        if get_settings().require_email_verification and user.email_verified_at is None:
+            # Only AFTER the password check: this answer must not reveal anything
+            # to someone who does not know the password.
+            raise PermissionDeniedError(EMAIL_NOT_VERIFIED)
 
         if password_needs_rehash(user.hashed_password):
             user.hashed_password = hash_password(password)
@@ -155,10 +163,98 @@ class AuthService:
             .execution_options(synchronize_session=False)
         )
 
+    # ------------------------------------------------------------ email tokens
+    def _issue_email_token(self, user: User, purpose: TokenPurpose, ttl: timedelta) -> str:
+        """New single-use token; older unused ones of the same purpose stop working."""
+        now = datetime.now(UTC)
+        self.db.execute(
+            update(UserToken)
+            .where(UserToken.user_id == user.id, UserToken.purpose == purpose, UserToken.used_at.is_(None))
+            .values(used_at=now)
+            .execution_options(synchronize_session=False)
+        )
+        raw, digest = new_email_token()
+        self.db.add(UserToken(user_id=user.id, purpose=purpose, token_hash=digest, expires_at=now + ttl))
+        self.db.commit()
+        return raw
+
+    def _consume_email_token(self, raw: str, purpose: TokenPurpose) -> User:
+        """Validate + mark used, atomically: the UPDATE ... WHERE used_at IS NULL
+        RETURNING succeeds for exactly one of two simultaneous clicks."""
+        now = datetime.now(UTC)
+        user_id = self.db.execute(
+            update(UserToken)
+            .where(
+                UserToken.token_hash == hash_email_token(raw),
+                UserToken.purpose == purpose,
+                UserToken.used_at.is_(None),
+                UserToken.expires_at > now,
+            )
+            .values(used_at=now)
+            .returning(UserToken.user_id)
+            .execution_options(synchronize_session=False)
+        ).scalar()
+        user = self.users.get_by_id(user_id) if user_id else None
+        if user is None or not user.is_active:
+            self.db.rollback()
+            raise UnprocessableError(INVALID_LINK)
+        return user
+
+    def start_email_verification(self, user: User) -> str:
+        """Raw token for the verification email."""
+        if user.email_verified_at is not None:
+            raise ConflictError("Your email address is already confirmed")
+        hours = get_settings().email_verification_ttl_hours
+        return self._issue_email_token(user, TokenPurpose.VERIFY_EMAIL, timedelta(hours=hours))
+
+    def verify_email(self, raw: str) -> User:
+        user = self._consume_email_token(raw, TokenPurpose.VERIFY_EMAIL)
+        if user.email_verified_at is None:
+            user.email_verified_at = datetime.now(UTC)
+        self.db.commit()
+        logger.info("Email verified for user %s", user.id)
+        return user
+
+    def start_password_reset(self, email: str) -> tuple[User, str] | None:
+        """(user, raw token) or None when there is no such active account. The
+        caller must answer the same way in both cases (no account enumeration)."""
+        user = self.users.get_by_email(email.strip())
+        if user is None or not user.is_active:
+            logger.info("Password reset requested for an unknown or disabled account")
+            return None
+        minutes = get_settings().password_reset_ttl_minutes
+        return user, self._issue_email_token(user, TokenPurpose.RESET_PASSWORD, timedelta(minutes=minutes))
+
+    def reset_password(self, raw: str, new_password: str) -> User:
+        """Set a new password and end EVERY session of the account: whoever
+        knew the old password (or stole a refresh token) is logged out."""
+        user = self._consume_email_token(raw, TokenPurpose.RESET_PASSWORD)
+        now = datetime.now(UTC)
+        user.hashed_password = hash_password(new_password)
+        if user.email_verified_at is None:
+            user.email_verified_at = now  # the reset link proved they own the inbox
+        self.db.execute(
+            update(RefreshToken)
+            .where(RefreshToken.user_id == user.id, RefreshToken.revoked_at.is_(None))
+            .values(revoked_at=now)
+            .execution_options(synchronize_session=False)
+        )
+        self.db.commit()
+        logger.info("Password reset for user %s; all sessions revoked", user.id)
+        return user
+
     @staticmethod
     def _access_token(user: User) -> Token:
         minutes = get_settings().access_token_expire_minutes
         return Token(access_token=create_access_token(user.id, user.role.value), expires_in=minutes * 60)
+
+
+def purge_expired_user_tokens(db: Session, *, older_than_days: int = 1) -> int:
+    """Delete verification / reset tokens that expired more than a day ago."""
+    cutoff = datetime.now(UTC) - timedelta(days=older_than_days)
+    result = db.execute(delete(UserToken).where(UserToken.expires_at < cutoff))
+    db.commit()
+    return result.rowcount or 0
 
 
 def purge_expired_refresh_tokens(db: Session, *, older_than_days: int = 1) -> int:

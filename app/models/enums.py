@@ -18,6 +18,11 @@ class DocumentStatus(StrEnum):
     FAILED = "failed"
 
 
+class TokenPurpose(StrEnum):
+    VERIFY_EMAIL = "verify_email"
+    RESET_PASSWORD = "reset_password"
+
+
 class MessageRole(StrEnum):
     USER = "user"
     ASSISTANT = "assistant"

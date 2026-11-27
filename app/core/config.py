@@ -99,6 +99,9 @@ class Settings(BaseSettings):
     rate_limit_register_per_ip: int = 5        # per hour
     rate_limit_chat_per_user: int = 30         # per minute
     rate_limit_upload_per_user: int = 30       # per hour
+    rate_limit_password_reset_per_ip: int = 10     # per hour
+    rate_limit_password_reset_per_email: int = 3   # per hour (no inbox flooding)
+    rate_limit_verification_email_per_user: int = 3  # per hour
 
     # --- Caching (Redis) ---
     cache_enabled: bool = True
@@ -107,6 +110,11 @@ class Settings(BaseSettings):
 
     # --- Observability ---
     slow_request_ms: int = 1500
+    # GET /metrics (Prometheus). It is NOT routed by nginx (only /api/ and
+    # /health/ are), so it is reachable only inside the Docker network. Set a
+    # token to also require "Authorization: Bearer <token>".
+    metrics_enabled: bool = True
+    metrics_token: SecretStr | None = None
 
     # --- Security ---
     hsts_enabled: bool = False  # set true only when served over HTTPS
@@ -117,7 +125,8 @@ class Settings(BaseSettings):
     def docs_enabled(self) -> bool:
         return self.api_docs_enabled if self.api_docs_enabled is not None else self.environment != "production"
 
-    @field_validator("openai_api_key", "openai_base_url", mode="before")
+    @field_validator("openai_api_key", "openai_base_url", "smtp_username", "smtp_password", "metrics_token",
+                     mode="before")
     @classmethod
     def _blank_to_none(cls, v: object) -> object:
         """Docker Compose passes unset optional variables as "" - treat as not set."""
@@ -217,6 +226,25 @@ class Settings(BaseSettings):
     # Two browser tabs may refresh at the same moment with the same token: a
     # second use within this window is a race, not token theft.
     refresh_reuse_grace_seconds: int = Field(default=10, ge=0, le=300)
+
+    # --- Email (verification + password reset) ---
+    # console -> emails are written to the log (development; links visible in logs)
+    # smtp    -> sent through SMTP_HOST (Mailpit in docker-compose, a real provider in production)
+    email_backend: Literal["console", "smtp"] = "console"
+    smtp_host: str = "localhost"
+    smtp_port: int = Field(default=587, ge=1, le=65535)
+    smtp_username: str | None = None
+    smtp_password: SecretStr | None = None
+    smtp_starttls: bool = False  # true for port 587 on real providers
+    smtp_timeout_seconds: float = Field(default=10, gt=0)
+    email_from: str = "DocuMind AI <no-reply@documind.local>"
+    # Links in emails point to the web app.
+    frontend_base_url: str = "http://localhost:5173"
+    email_verification_ttl_hours: int = Field(default=48, ge=1, le=24 * 30)
+    password_reset_ttl_minutes: int = Field(default=30, ge=5, le=24 * 60)
+    # true = an unverified account cannot log in. Off by default so existing
+    # accounts keep working; the web app nudges unverified users instead.
+    require_email_verification: bool = False
 
     @property
     def refresh_cookie_secure_effective(self) -> bool:

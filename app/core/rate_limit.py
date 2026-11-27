@@ -113,6 +113,12 @@ def limit_by_user(scope: str, limit_setting: str, window_seconds: int) -> Callab
     return dependency
 
 
+def limit_by_email(scope: str, email: str, *, limit: int, window_seconds: int, message: str) -> None:
+    """Per-account limit for endpoints that receive an email in the body
+    (the email is hashed: no personal data in Redis keys)."""
+    enforce(scope, _hash(email.strip()), limit=limit, window_seconds=window_seconds, message=message)
+
+
 def limit_login_attempts(request: Request, email: str) -> None:
     """Two limits on login: per IP (one attacker, many accounts) and per email
     (many IPs guessing ONE account's password). Called from the login route

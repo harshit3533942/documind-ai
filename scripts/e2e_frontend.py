@@ -13,10 +13,13 @@ browser console error or HTTP 5xx.
 """
 
 import argparse
+import json
 import re
 import sys
 import tempfile
 import time
+import urllib.parse
+import urllib.request
 from pathlib import Path
 
 from playwright.sync_api import expect, sync_playwright
@@ -31,10 +34,27 @@ PAGES = [
 ]
 
 
+def latest_link(mailpit: str, to: str, path: str, timeout: float = 30) -> str:
+    """The newest link to `path` in an email to `to`, read from Mailpit's API."""
+    query = urllib.parse.quote(f'to:"{to}"')
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        with urllib.request.urlopen(f"{mailpit}/api/v1/search?query={query}", timeout=5) as r:  # noqa: S310 - local test
+            messages = json.load(r)["messages"]
+        for summary in messages:  # newest first
+            with urllib.request.urlopen(f"{mailpit}/api/v1/message/{summary['ID']}", timeout=5) as r:  # noqa: S310
+                text = json.load(r)["Text"]
+            if match := re.search(rf"(https?://\S+{re.escape(path)}\?token=[\w-]+)", text):
+                return match.group(1)
+        time.sleep(0.5)
+    raise AssertionError(f"no email with a {path} link for {to}")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--base", default="http://127.0.0.1:5173")
     parser.add_argument("--shots", default=tempfile.gettempdir())
+    parser.add_argument("--mailpit", default="http://localhost:8025", help="Mailpit web/API address")
     args = parser.parse_args()
     shots = Path(args.shots)
     shots.mkdir(parents=True, exist_ok=True)
@@ -61,7 +81,17 @@ def main() -> int:
     with sync_playwright() as p:
         browser = p.chromium.launch()
         page = browser.new_page(viewport={"width": 1280, "height": 860})
-        page.on("console", lambda m: m.type == "error" and console_errors.append(m.text))
+        expected_failures = []  # (url suffix, status) the test triggers on purpose
+
+        def on_console(m) -> None:  # noqa: ANN001
+            if m.type != "error":
+                return
+            url = m.location.get("url", "")
+            if any(url.endswith(suffix) and str(code) in m.text for suffix, code in expected_failures):
+                return  # the browser logs every failed request; this one is the point of the test
+            console_errors.append(f"{m.text} @ {url}")
+
+        page.on("console", on_console)
         page.on("response", lambda r: r.status >= 500 and server_errors.append(f"{r.status} {r.url}"))
         expect.set_options(timeout=15_000)
 
@@ -80,6 +110,17 @@ def main() -> int:
         expect(page).to_have_url(re.compile(r"/upload$"))
         ok(f"registered {email} and landed on /upload")
 
+        # 2b. email verification: banner -> link from the email (Mailpit) -> confirmed
+        expect(page.get_by_text("Please confirm your email address")).to_be_visible()
+        verify_link = latest_link(args.mailpit, email, "/verify-email")
+        page.goto(verify_link)
+        expect(page.get_by_text("Your email address is confirmed.")).to_be_visible()
+        expect(page).to_have_url(re.compile(r"/verify-email$"))  # token removed from the address bar
+        page.get_by_role("link", name="Go to DocuMind").click()
+        expect(page.get_by_text("Please confirm your email address")).to_have_count(0)
+        page.get_by_label("Main").get_by_role("link", name="Upload").click()
+        ok("verification email received; its link confirms the address and the banner disappears")
+
         # 3. upload -> live status until processed by the Celery worker
         page.set_input_files("[data-testid=file-input]", str(pdf_path))
         expect(page.get_by_text("Ready:")).to_be_visible(timeout=90_000)
@@ -92,7 +133,7 @@ def main() -> int:
         page.get_by_label("Your question").fill("How many vacation days do I get?")
         page.keyboard.press("Enter")
         answer = page.locator("div.rounded-bl-sm").last
-        expect(answer).to_contain_text("24 days")
+        expect(answer).to_contain_text("24 days", timeout=60_000)  # first question after a restart loads the re-ranker
         expect(answer).to_contain_text("e2e-handbook.pdf")
         expect(answer).to_contain_text("p. 1")
         expect(page).to_have_url(re.compile(r"/chat/[0-9a-f-]{36}$"))
@@ -246,6 +287,31 @@ def main() -> int:
         page.goto(f"{args.base}/chat")
         expect(page).to_have_url(re.compile(r"/login$"))
         ok("logout clears the session; /chat redirects to /login again")
+
+        # 11. forgot password -> email -> new password -> log in with it
+        page.goto(f"{args.base}/login")
+        page.get_by_role("link", name="Forgot password?").click()
+        page.get_by_label("Email").fill(email)
+        page.get_by_role("button", name="Send reset link").click()
+        expect(page.get_by_text("If an account exists for this email")).to_be_visible()
+        page.goto(latest_link(args.mailpit, email, "/reset-password"))
+        expect(page).to_have_url(re.compile(r"/reset-password$"))
+        new_password_inputs = page.locator("input[autocomplete=new-password]")
+        new_password_inputs.nth(0).fill("NewE2ePassw0rd")
+        new_password_inputs.nth(1).fill("NewE2ePassw0rd")
+        page.get_by_role("button", name="Set new password").click()
+        expect(page.get_by_text("Your password has been changed.")).to_be_visible()
+        page.get_by_role("link", name="Log in").last.click()
+        page.get_by_label("Email").fill(email)
+        page.get_by_label("Password").fill("E2eTest12345")
+        expected_failures.append(("/api/v1/auth/login", 401))  # the OLD password must be rejected
+        page.get_by_role("button", name="Log in").click()
+        expect(page.get_by_text("Incorrect email or password")).to_be_visible()
+        page.get_by_label("Password").fill("NewE2ePassw0rd")
+        page.get_by_role("button", name="Log in").click()
+        expect(page).not_to_have_url(re.compile(r"/login$"))
+        page.get_by_role("button", name="Log out").click()
+        ok("password reset by email: old password rejected, new password logs in")
         browser.close()
 
     print(f"\n  console errors: {len(console_errors)}   HTTP 5xx: {len(server_errors)}")

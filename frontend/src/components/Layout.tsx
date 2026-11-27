@@ -1,6 +1,35 @@
+import { useState } from "react";
 import { NavLink, Outlet } from "react-router-dom";
+import { ApiError, api } from "../api/client";
 import { useAuth } from "../auth/AuthContext";
 import { Button } from "./ui";
+
+/** A nudge, not a wall: unverified accounts can use the app unless the server
+ *  enforces REQUIRE_EMAIL_VERIFICATION at login. */
+function VerifyEmailBanner({ email }: { email: string }) {
+  const [note, setNote] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const resend = async () => {
+    setBusy(true);
+    try {
+      setNote((await api.resendVerification()).message);
+    } catch (err) {
+      setNote(err instanceof ApiError ? err.message : "Could not send the email.");
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <div className="border-b border-amber-200 bg-amber-50" role="status">
+      <div className="mx-auto flex max-w-7xl flex-wrap items-center gap-x-3 gap-y-1 px-4 py-2 text-sm text-amber-900 sm:px-6">
+        <span>Please confirm your email address - we sent a link to <strong>{email}</strong>.</span>
+        {note ? <span className="text-amber-800">{note}</span> : (
+          <button className="font-medium underline disabled:opacity-50" disabled={busy} onClick={() => void resend()}>Send a new link</button>
+        )}
+      </div>
+    </div>
+  );
+}
 
 const NAV = [
   { to: "/", label: "Dashboard", end: true },
@@ -47,6 +76,7 @@ export function Layout() {
           </div>
         </div>
       </header>
+      {user && !user.email_verified_at && <VerifyEmailBanner email={user.email} />}
       <main className="mx-auto max-w-7xl px-4 py-8 sm:px-6">
         <Outlet />
       </main>

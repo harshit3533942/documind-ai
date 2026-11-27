@@ -1,6 +1,8 @@
 from typing import TYPE_CHECKING
 
-from sqlalchemy import Boolean, String, true
+from datetime import datetime
+
+from sqlalchemy import Boolean, DateTime, String, true
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.database.base import Base, CreatedAtMixin, UUIDPrimaryKeyMixin
@@ -23,6 +25,9 @@ class User(UUIDPrimaryKeyMixin, CreatedAtMixin, Base):
         str_enum_column(UserRole, "user_role"), default=UserRole.USER, nullable=False
     )
     is_active: Mapped[bool] = mapped_column(Boolean, server_default=true(), nullable=False)
+    # Set when the user clicks the link in the verification email (or resets
+    # their password - that also proves they own the inbox).
+    email_verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
     # One user -> many documents / conversations.
     # passive_deletes=True: let PostgreSQL's ON DELETE CASCADE do the work

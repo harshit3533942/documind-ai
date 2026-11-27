@@ -102,7 +102,10 @@ async function parseError(res: Response): Promise<ApiError> {
   return new ApiError(res.status, message, code);
 }
 
-const NO_REFRESH = ["/auth/login", "/auth/register", "/auth/refresh", "/auth/logout"];
+const NO_REFRESH = [
+  "/auth/login", "/auth/register", "/auth/refresh", "/auth/logout",
+  "/auth/verify-email", "/auth/password-reset/request", "/auth/password-reset/confirm",
+];
 
 /** fetch() with the access token. On 401 the token has probably just expired:
  *  refresh it once and repeat the request. If that fails too -> logged out. */
@@ -152,6 +155,15 @@ export const api = {
       body: new URLSearchParams({ username: email, password }), // OAuth2 password form
     }),
   me: () => request<User>("/auth/me"),
+  verifyEmail: (token: string) =>
+    request<User>("/auth/verify-email", { method: "POST", body: JSON.stringify({ token }) }),
+  resendVerification: () => request<{ message: string }>("/auth/verify-email/resend", { method: "POST" }),
+  requestPasswordReset: (email: string) =>
+    request<{ message: string }>("/auth/password-reset/request", { method: "POST", body: JSON.stringify({ email }) }),
+  confirmPasswordReset: (token: string, newPassword: string) =>
+    request<void>("/auth/password-reset/confirm", {
+      method: "POST", body: JSON.stringify({ token, new_password: newPassword }),
+    }),
   logout: () => request<void>("/auth/logout", { method: "POST", headers: { "X-Requested-With": "fetch" } }),
 
   // documents

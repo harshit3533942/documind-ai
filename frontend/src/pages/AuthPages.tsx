@@ -4,7 +4,7 @@ import { ApiError } from "../api/client";
 import { useAuth } from "../auth/AuthContext";
 import { Button, Card, ErrorBanner, inputClass } from "../components/ui";
 
-function AuthShell({ title, subtitle, children }: { title: string; subtitle: string; children: ReactNode }) {
+export function AuthShell({ title, subtitle, children }: { title: string; subtitle: string; children: ReactNode }) {
   return (
     <div className="flex min-h-screen items-center justify-center bg-gradient-to-b from-brand-50 to-page px-4 py-12">
       <div className="w-full max-w-md">
@@ -22,7 +22,7 @@ function AuthShell({ title, subtitle, children }: { title: string; subtitle: str
   );
 }
 
-function Field({ label, children }: { label: string; children: ReactNode }) {
+export function Field({ label, children }: { label: string; children: ReactNode }) {
   return (
     <label className="block">
       <span className="mb-1 block text-sm font-medium text-ink">{label}</span>
@@ -31,7 +31,8 @@ function Field({ label, children }: { label: string; children: ReactNode }) {
   );
 }
 
-const message = (err: unknown) => (err instanceof ApiError ? err.message : "Something went wrong. Please try again.");
+export const errorMessage = (err: unknown) => (err instanceof ApiError ? err.message : "Something went wrong. Please try again.");
+const message = errorMessage;
 
 export function LoginPage() {
   const { user, login } = useAuth();
@@ -66,6 +67,9 @@ export function LoginPage() {
         <Field label="Password">
           <input className={inputClass} type="password" autoComplete="current-password" required value={password} onChange={(e) => setPassword(e.target.value)} />
         </Field>
+        <p className="text-right text-sm">
+          <Link to="/forgot-password" className="text-brand-700 underline-offset-2 hover:underline">Forgot password?</Link>
+        </p>
         <Button type="submit" className="w-full" disabled={busy}>{busy ? "Logging in…" : "Log in"}</Button>
       </form>
       <p className="mt-6 text-center text-sm text-ink-muted">

@@ -82,6 +82,12 @@ def hash_refresh_token(raw: str) -> str:
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
+# Email tokens (verification / password reset) are built exactly the same way:
+# 256 random bits for the link, only the SHA-256 hash in the database.
+new_email_token = new_refresh_token
+hash_email_token = hash_refresh_token
+
+
 def decode_access_token(token: str) -> dict[str, Any]:
     settings = get_settings()
     try:

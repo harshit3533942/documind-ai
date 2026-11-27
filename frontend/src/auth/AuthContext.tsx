@@ -8,6 +8,8 @@ interface AuthState {
   login: (email: string, password: string) => Promise<void>;
   register: (name: string, email: string, password: string) => Promise<void>;
   logout: () => void;
+  /** Re-load the profile (e.g. after the email was confirmed). */
+  reloadUser: () => Promise<void>;
 }
 
 const AuthContext = createContext<AuthState | null>(null);
@@ -55,7 +57,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setUser(null);
   }, []);
 
-  const value = useMemo(() => ({ user, loading, login, register, logout }), [user, loading, login, register, logout]);
+  const reloadUser = useCallback(async () => {
+    if (tokenStore.get()) setUser(await api.me());
+  }, []);
+
+  const value = useMemo(
+    () => ({ user, loading, login, register, logout, reloadUser }),
+    [user, loading, login, register, logout, reloadUser],
+  );
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
 }
 
