@@ -5,19 +5,56 @@ import type {
 } from "./types";
 
 const BASE = "/api/v1";
-const TOKEN_KEY = "documind.token";
 
-// --- token storage -----------------------------------------------------------
-// localStorage keeps the user logged in across tabs/reloads. Trade-off: any
-// script running on the page can read it (XSS). Mitigations: no third-party
-// scripts, React escapes all rendered text, short-lived tokens (60 min), CSP
-// headers from nginx. An httpOnly cookie avoids XSS token theft but needs CSRF
-// protection - see docs/security.md.
+// --- session tokens ------------------------------------------------------------
+// Access token (15 min JWT): kept ONLY in memory - never in localStorage, so an
+// XSS bug cannot read a token that stays valid after the page is closed.
+// Refresh token (14 days): an httpOnly cookie the browser sends only to
+// /api/v1/auth/*. JavaScript never sees it. After a reload the memory is empty,
+// so the app calls /auth/refresh once to get a new access token ("silent login").
+let accessToken: string | null = null;
+localStorage.removeItem("documind.token"); // tokens stored by older versions of the app
+
 export const tokenStore = {
-  get: (): string | null => localStorage.getItem(TOKEN_KEY),
-  set: (token: string) => localStorage.setItem(TOKEN_KEY, token),
-  clear: () => localStorage.removeItem(TOKEN_KEY),
+  get: (): string | null => accessToken,
+  set: (token: string) => { accessToken = token; },
+  clear: () => { accessToken = null; },
 };
+
+// Single flight: if five requests get a 401 at the same moment, only ONE refresh
+// call goes out and all five wait for it (a second call with the same cookie
+// would look like token reuse to the server).
+let refreshing: Promise<boolean> | null = null;
+
+/** Get a new access token from the refresh cookie. false = must log in again. */
+export function refreshSession(): Promise<boolean> {
+  refreshing ??= (async () => {
+    try {
+      for (let attempt = 0; attempt < 2; attempt++) {
+        const res = await fetch(`${BASE}/auth/refresh`, {
+          method: "POST",
+          headers: { "X-Requested-With": "fetch" }, // CSRF defence: forms cannot set custom headers
+          credentials: "same-origin",
+        });
+        if (res.ok) {
+          tokenStore.set(((await res.json()) as Token).access_token);
+          return true;
+        }
+        // 409: another tab rotated the cookie a moment ago; the browser now has the
+        // new cookie, so one retry succeeds.
+        if (res.status !== 409) break;
+        await new Promise((r) => setTimeout(r, 300));
+      }
+      tokenStore.clear();
+      return false;
+    } catch {
+      return false; // network error: keep the current state, the next request retries
+    } finally {
+      refreshing = null;
+    }
+  })();
+  return refreshing;
+}
 
 export class ApiError extends Error {
   constructor(public status: number, message: string, public code?: string) {
@@ -53,18 +90,33 @@ async function parseError(res: Response): Promise<ApiError> {
   return new ApiError(res.status, message, code);
 }
 
+const NO_REFRESH = ["/auth/login", "/auth/register", "/auth/refresh", "/auth/logout"];
+
+/** fetch() with the access token. On 401 the token has probably just expired:
+ *  refresh it once and repeat the request. If that fails too -> logged out. */
+async function authFetch(path: string, init: RequestInit = {}): Promise<Response> {
+  const send = () => {
+    const headers = new Headers(init.headers);
+    const token = tokenStore.get();
+    if (token) headers.set("Authorization", `Bearer ${token}`);
+    if (init.body && !(init.body instanceof FormData) && !(init.body instanceof URLSearchParams)) {
+      headers.set("Content-Type", "application/json");
+    }
+    return fetch(`${BASE}${path}`, { ...init, headers, credentials: "same-origin" });
+  };
+  const res = await send();
+  if (res.status !== 401 || NO_REFRESH.includes(path)) return res;
+  if (await refreshSession()) {
+    const retried = await send();
+    if (retried.status !== 401) return retried;
+  }
+  tokenStore.clear();
+  window.dispatchEvent(new Event(UNAUTHORIZED_EVENT));
+  return res;
+}
+
 async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
-  const headers = new Headers(init.headers);
-  const token = tokenStore.get();
-  if (token) headers.set("Authorization", `Bearer ${token}`);
-  if (init.body && !(init.body instanceof FormData) && !(init.body instanceof URLSearchParams)) {
-    headers.set("Content-Type", "application/json");
-  }
-  const res = await fetch(`${BASE}${path}`, { ...init, headers });
-  if (res.status === 401 && token) {
-    tokenStore.clear();
-    window.dispatchEvent(new Event(UNAUTHORIZED_EVENT));
-  }
+  const res = await authFetch(path, init);
   if (!res.ok) throw await parseError(res);
   if (res.status === 204) return undefined as T;
   return (await res.json()) as T;
@@ -88,6 +140,7 @@ export const api = {
       body: new URLSearchParams({ username: email, password }), // OAuth2 password form
     }),
   me: () => request<User>("/auth/me"),
+  logout: () => request<void>("/auth/logout", { method: "POST", headers: { "X-Requested-With": "fetch" } }),
 
   // documents
   listDocuments: (params: { limit?: number; offset?: number; status?: DocumentStatus } = {}) =>
@@ -112,11 +165,80 @@ export const api = {
   deleteConversation: (id: string) => request<void>(`/conversations/${id}`, { method: "DELETE" }),
 };
 
+// --- streaming answers (Server-Sent Events) -----------------------------------
+export interface StreamHandlers {
+  onMeta?: (meta: { conversation_id: string; conversation_title: string }) => void;
+  onToken: (text: string) => void;
+}
+
+/**
+ * POST /chat/stream and read the SSE events as they arrive. Resolves with the
+ * final AskResponse (the `done` event). The browser's EventSource only supports
+ * GET without headers, so the stream is read by hand from fetch().body.
+ */
+export async function askStream(
+  question: string, conversationId: string | undefined, documentIds: string[],
+  handlers: StreamHandlers, signal?: AbortSignal,
+): Promise<AskResponse> {
+  const res = await authFetch("/chat/stream", {
+    method: "POST",
+    signal,
+    body: JSON.stringify({
+      question,
+      conversation_id: conversationId ?? null,
+      document_ids: documentIds.length ? documentIds : null,
+    }),
+  });
+  if (!res.ok) throw await parseError(res);
+  if (!res.body) throw new ApiError(0, "Streaming is not supported by this browser.");
+
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  for (;;) {
+    const { value, done } = await reader.read();
+    buffer += decoder.decode(value, { stream: !done }).replace(/\r\n/g, "\n");
+    // Events are separated by a blank line; the last piece may be incomplete.
+    const blocks = buffer.split("\n\n");
+    buffer = done ? "" : blocks.pop()!;
+    for (const block of blocks) {
+      let event = "message";
+      let data = "";
+      for (const line of block.split("\n")) {
+        if (line.startsWith("event:")) event = line.slice(6).trim();
+        else if (line.startsWith("data:")) data += line.slice(5).trim();
+      }
+      if (!data) continue;
+      const payload = JSON.parse(data);
+      if (event === "meta") handlers.onMeta?.(payload);
+      else if (event === "token") handlers.onToken(payload.text);
+      else if (event === "done") return payload as AskResponse;
+      else if (event === "error") throw new ApiError(500, payload.message);
+    }
+    if (done) throw new ApiError(0, "The connection closed before the answer was complete.");
+  }
+}
+
 /**
  * Upload with progress. fetch() cannot report upload progress, so this uses
- * XMLHttpRequest. Resolves with the created document.
+ * XMLHttpRequest. Resolves with the created document. An expired access token
+ * is refreshed once and the upload repeated.
  */
-export function uploadDocument(file: File, onProgress: (fraction: number) => void): Promise<DocumentItem> {
+export async function uploadDocument(file: File, onProgress: (fraction: number) => void): Promise<DocumentItem> {
+  try {
+    return await uploadOnce(file, onProgress);
+  } catch (err) {
+    if (!(err instanceof ApiError && err.status === 401)) throw err;
+    if (!(await refreshSession())) {
+      window.dispatchEvent(new Event(UNAUTHORIZED_EVENT));
+      throw err;
+    }
+    onProgress(0);
+    return uploadOnce(file, onProgress);
+  }
+}
+
+function uploadOnce(file: File, onProgress: (fraction: number) => void): Promise<DocumentItem> {
   return new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest();
     xhr.open("POST", `${BASE}/documents`);

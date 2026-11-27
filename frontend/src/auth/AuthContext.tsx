@@ -1,10 +1,10 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from "react";
-import { api, tokenStore, UNAUTHORIZED_EVENT } from "../api/client";
+import { api, refreshSession, tokenStore, UNAUTHORIZED_EVENT } from "../api/client";
 import type { User } from "../api/types";
 
 interface AuthState {
   user: User | null;
-  loading: boolean; // true while the stored token is being checked
+  loading: boolean; // true while the silent login (refresh cookie) is checked
   login: (email: string, password: string) => Promise<void>;
   register: (name: string, email: string, password: string) => Promise<void>;
   logout: () => void;
@@ -14,13 +14,13 @@ const AuthContext = createContext<AuthState | null>(null);
 
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<User | null>(null);
-  const [loading, setLoading] = useState(Boolean(tokenStore.get()));
+  const [loading, setLoading] = useState(true);
 
-  // On start: a stored token is only trusted after /auth/me confirms it.
+  // On start the access token (memory only) is gone: the refresh cookie, if the
+  // user has a valid session, buys a new one ("silent login").
   useEffect(() => {
-    if (!tokenStore.get()) return;
-    api.me()
-      .then(setUser)
+    refreshSession()
+      .then((ok) => (ok ? api.me().then(setUser) : undefined))
       .catch(() => tokenStore.clear())
       .finally(() => setLoading(false));
   }, []);
@@ -44,6 +44,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, [login]);
 
   const logout = useCallback(() => {
+    // Revoke the session on the server (and clear the cookie). The UI logs out
+    // immediately either way - a network error must not keep the user logged in.
+    void api.logout().catch(() => {});
     tokenStore.clear();
     setUser(null);
   }, []);

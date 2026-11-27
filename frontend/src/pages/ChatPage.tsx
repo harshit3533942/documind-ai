@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type FormEvent, type KeyboardEvent } from "react";
 import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
-import { ApiError, api } from "../api/client";
+import { ApiError, api, askStream } from "../api/client";
 import type { Conversation, DocumentItem, Message } from "../api/types";
 import { Markdown } from "../components/Markdown";
 import { Button, Card, ErrorBanner, Spinner, timeAgo } from "../components/ui";
@@ -32,8 +32,11 @@ function MessageBubble({ m }: { m: Message }) {
 /** Remove citation markers like [1] or [2][3] - only numbers that really are citations of this
  *  message, and never inside `code`, so things like `scores[1]` stay intact. */
 function stripCitationMarkers(m: Message): string {
+  // While streaming, the citations are not known yet: hide every [n] marker
+  // (the final saved message replaces the draft and is filtered precisely).
+  const streaming = m.id.startsWith("streaming-");
   const numbers = new Set(m.citations.map((c) => c.number));
-  if (numbers.size === 0) return m.content;
+  if (numbers.size === 0 && !streaming) return m.content;
   const parts = m.content.split(/(```[\s\S]*?```|`[^`\n]*`)/); // odd indexes = code
   return parts
     .map((part, i) =>
@@ -41,7 +44,7 @@ function stripCitationMarkers(m: Message): string {
         ? part
         : part
             .replace(/[ \t]*((?:\[\d+\])+)/g, (whole, group: string) =>
-              [...group.matchAll(/\d+/g)].every((n) => numbers.has(Number(n[0]))) ? "" : whole)
+              streaming || [...group.matchAll(/\d+/g)].every((n) => numbers.has(Number(n[0]))) ? "" : whole)
             .replace(/[ \t]+([.,;:!?])/g, "$1"),
     )
     .join("")
@@ -60,8 +63,10 @@ export function ChatPage() {
   const [question, setQuestion] = useState("");
   const [loadingHistory, setLoadingHistory] = useState(false);
   const [sending, setSending] = useState(false);
+  const [streaming, setStreaming] = useState(false); // first token has arrived
   const [error, setError] = useState<string | null>(null);
   const justCreated = useRef<string | null>(null);
+  const streamAbort = useRef<AbortController | null>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
 
   const loadConversations = () => api.listConversations(30).then((p) => setConversations(p.items)).catch(() => {});
@@ -92,32 +97,73 @@ export function ChatPage() {
     bottomRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
   }, [messages, sending]);
 
+  // Stop a running stream when leaving the page (otherwise it would keep
+  // reading and call setState on an unmounted component).
+  useEffect(() => () => streamAbort.current?.abort(), []);
+
   const send = async (text: string) => {
     const q = text.trim();
     if (!q || sending) return;
     setSending(true);
+    setStreaming(false);
     setError(null);
     setQuestion("");
+    const stamp = Date.now();
+    const now = new Date().toISOString();
     const optimistic: Message = {
-      id: `pending-${Date.now()}`, role: "user", content: q, created_at: new Date().toISOString(),
+      id: `pending-${stamp}`, role: "user", content: q, created_at: now,
       citations: [], found: null, mode: null, grounded: null, document_ids: selected,
     };
+    const draftId = `streaming-${stamp}`;
     setMessages((prev) => [...prev, optimistic]);
+    const abort = new AbortController();
+    streamAbort.current = abort;
     try {
-      const res = await api.ask(q, conversationId, selected);
-      setMessages((prev) => [...prev.filter((m) => m.id !== optimistic.id), res.user_message, res.assistant_message]);
-      if (!conversationId) {
-        justCreated.current = res.conversation_id;
-        navigate(`/chat/${res.conversation_id}`, { replace: true });
-      }
+      const res = await askStream(q, conversationId, selected, {
+        onMeta: (meta) => {
+          // New conversation: put its id in the URL right away. justCreated stops
+          // the history effect from reloading (and wiping) the live messages.
+          if (!conversationId) {
+            justCreated.current = meta.conversation_id;
+            navigate(`/chat/${meta.conversation_id}`, { replace: true });
+          }
+        },
+        onToken: (piece) => {
+          setStreaming(true);
+          setMessages((prev) => {
+            const draft = prev.find((m) => m.id === draftId);
+            if (!draft) {
+              return [...prev, { ...optimistic, id: draftId, role: "assistant", content: piece, document_ids: null }];
+            }
+            return prev.map((m) => (m.id === draftId ? { ...m, content: m.content + piece } : m));
+          });
+        },
+      }, abort.signal);
+      // The saved answer is authoritative (citations, found flag, final text).
+      setMessages((prev) => [
+        ...prev.filter((m) => m.id !== optimistic.id && m.id !== draftId), res.user_message, res.assistant_message,
+      ]);
       void loadConversations();
     } catch (err) {
-      setMessages((prev) => prev.filter((m) => m.id !== optimistic.id));
+      if (abort.signal.aborted) return;
+      setMessages((prev) => prev.filter((m) => m.id !== optimistic.id && m.id !== draftId));
       setQuestion(q); // give the text back so the user can retry
       setError(err instanceof ApiError ? err.message : "Could not get an answer.");
     } finally {
-      setSending(false);
+      if (streamAbort.current === abort) streamAbort.current = null;
+      if (!abort.signal.aborted) {
+        setSending(false);
+        setStreaming(false);
+      }
     }
+  };
+
+  const newConversation = () => {
+    streamAbort.current?.abort();
+    setSending(false);
+    setStreaming(false);
+    justCreated.current = null;
+    navigate("/chat");
   };
 
   const onSubmit = (e: FormEvent) => {
@@ -136,7 +182,7 @@ export function ChatPage() {
     <div className="grid gap-6 lg:grid-cols-[280px_1fr]">
       {/* Sidebar: conversations + document selection */}
       <aside className="order-2 min-w-0 space-y-5 lg:order-1">
-        <Button variant="primary" className="w-full" onClick={() => { justCreated.current = null; navigate("/chat"); }}>+ New conversation</Button>
+        <Button variant="primary" className="w-full" onClick={newConversation}>+ New conversation</Button>
 
         <Card className="p-4">
           <p className="text-xs font-semibold uppercase tracking-wide text-ink-soft">Search in</p>
@@ -197,7 +243,7 @@ export function ChatPage() {
               </div>
             )}
             {messages.map((m) => <MessageBubble key={m.id} m={m} />)}
-            {sending && <Spinner label="Searching your documents…" />}
+            {sending && !streaming && <Spinner label="Searching your documents…" />}
             <div ref={bottomRef} />
           </div>
 
