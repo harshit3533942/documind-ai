@@ -184,6 +184,30 @@ def test_other_user_cannot_access_document(client, alice, bob, storage) -> None:
     assert len(stored_files(storage)) == 1
 
 
+# ------------------------------------------------------------------ file download (viewer)
+def test_owner_can_open_original_file_inline(client, alice, bob) -> None:
+    data = pdf_factory.text_pdf(["page one", "page two"])
+    doc_id = upload(client, alice, data, name="hand book.pdf").json()["id"]
+
+    resp = client.get(f"{DOCS}/{doc_id}/file", headers=alice)
+    assert resp.status_code == 200
+    assert resp.content == data
+    assert resp.headers["content-type"] == "application/pdf"
+    assert resp.headers["content-disposition"].startswith("inline")
+    assert "private" in resp.headers["cache-control"]
+
+    assert client.get(f"{DOCS}/{doc_id}/file", headers=bob).status_code == 404  # isolation
+    assert client.get(f"{DOCS}/{doc_id}/file").status_code == 401
+
+
+def test_file_missing_on_disk_is_404(client, alice, storage) -> None:
+    doc_id = upload(client, alice, pdf_factory.text_pdf(["x"])).json()["id"]
+    for path in stored_files(storage):
+        path.unlink()
+    resp = client.get(f"{DOCS}/{doc_id}/file", headers=alice)
+    assert resp.status_code == 404 and "no longer available" in resp.json()["error"]["message"]
+
+
 # ------------------------------------------------------------------ delete
 def test_delete_removes_row_chunks_and_file(client, alice, storage, db_session: Session) -> None:
     doc_id = uuid.UUID(upload(client, alice, pdf_factory.text_pdf(["x"])).json()["id"])

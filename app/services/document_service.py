@@ -10,7 +10,7 @@ Text extraction, chunking and embeddings happen later in a background worker.
 """
 
 import uuid
-from pathlib import PurePosixPath
+from pathlib import Path, PurePosixPath
 from typing import BinaryIO
 
 from sqlalchemy.orm import Session
@@ -144,6 +144,15 @@ class DocumentService:
             # 404 (not 403) for someone else's document: do not even reveal it exists.
             raise NotFoundError("Document not found")
         return document
+
+    def file_for(self, user: User, document_id: uuid.UUID) -> tuple[Document, Path]:
+        """The stored file of one of the user's documents (404 for anyone else)."""
+        document = self.get(user, document_id)
+        path = self.storage.path_for(document.storage_key)
+        if not path.is_file():
+            logger.error("Document %s has no stored file %s", document.id, document.storage_key)
+            raise NotFoundError("The original file is no longer available")
+        return document, path
 
     def list_documents(self, user: User, *, limit: int, offset: int, status: DocumentStatus | None) -> tuple[list[Document], int]:
         return self.documents.list_for_user(user.id, limit=limit, offset=offset, status=status)

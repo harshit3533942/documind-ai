@@ -15,10 +15,22 @@ const BASE = "/api/v1";
 let accessToken: string | null = null;
 localStorage.removeItem("documind.token"); // tokens stored by older versions of the app
 
+// Not a secret, just a hint "this browser probably has a session": JavaScript
+// cannot see the httpOnly cookie, and calling /auth/refresh without one is a 401
+// (a red console error) on every visit to the login page.
+const SESSION_HINT = "documind.session";
+
 export const tokenStore = {
   get: (): string | null => accessToken,
-  set: (token: string) => { accessToken = token; },
-  clear: () => { accessToken = null; },
+  set: (token: string) => {
+    accessToken = token;
+    localStorage.setItem(SESSION_HINT, "1");
+  },
+  clear: () => {
+    accessToken = null;
+    localStorage.removeItem(SESSION_HINT);
+  },
+  mayHaveSession: (): boolean => localStorage.getItem(SESSION_HINT) === "1",
 };
 
 // Single flight: if five requests get a 401 at the same moment, only ONE refresh
@@ -162,8 +174,19 @@ export const api = {
   listConversations: (limit = 50, offset = 0) => request<Page<Conversation>>(`/conversations${qs({ limit, offset })}`),
   getConversation: (id: string) => request<Conversation>(`/conversations/${id}`),
   listMessages: (id: string) => request<Page<Message>>(`/conversations/${id}/messages?limit=200`),
+  setFeedback: (conversationId: string, messageId: string, rating: 1 | -1 | null) =>
+    request<Message>(`/conversations/${conversationId}/messages/${messageId}/feedback`, {
+      method: "PUT", body: JSON.stringify({ rating }),
+    }),
   deleteConversation: (id: string) => request<void>(`/conversations/${id}`, { method: "DELETE" }),
 };
+
+/** The original uploaded file (needs the auth header, so it is fetched as a Blob). */
+export async function fetchDocumentFile(id: string): Promise<Blob> {
+  const res = await authFetch(`/documents/${id}/file`);
+  if (!res.ok) throw await parseError(res);
+  return res.blob();
+}
 
 // --- streaming answers (Server-Sent Events) -----------------------------------
 export interface StreamHandlers {
@@ -178,7 +201,7 @@ export interface StreamHandlers {
  */
 export async function askStream(
   question: string, conversationId: string | undefined, documentIds: string[],
-  handlers: StreamHandlers, signal?: AbortSignal,
+  handlers: StreamHandlers, signal?: AbortSignal, regenerate = false,
 ): Promise<AskResponse> {
   const res = await authFetch("/chat/stream", {
     method: "POST",
@@ -187,6 +210,7 @@ export async function askStream(
       question,
       conversation_id: conversationId ?? null,
       document_ids: documentIds.length ? documentIds : null,
+      regenerate,
     }),
   });
   if (!res.ok) throw await parseError(res);
@@ -195,6 +219,7 @@ export async function askStream(
   const reader = res.body.getReader();
   const decoder = new TextDecoder();
   let buffer = "";
+  let result: AskResponse | null = null;
   for (;;) {
     const { value, done } = await reader.read();
     buffer += decoder.decode(value, { stream: !done }).replace(/\r\n/g, "\n");
@@ -212,10 +237,13 @@ export async function askStream(
       const payload = JSON.parse(data);
       if (event === "meta") handlers.onMeta?.(payload);
       else if (event === "token") handlers.onToken(payload.text);
-      else if (event === "done") return payload as AskResponse;
+      else if (event === "done") result = payload as AskResponse; // the server closes right after it
       else if (event === "error") throw new ApiError(500, payload.message);
     }
-    if (done) throw new ApiError(0, "The connection closed before the answer was complete.");
+    if (done) {
+      if (result) return result;
+      throw new ApiError(0, "The connection closed before the answer was complete.");
+    }
   }
 }
 

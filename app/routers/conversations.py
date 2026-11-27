@@ -8,7 +8,7 @@ from fastapi import APIRouter, Query, Response, status
 
 from app.core.dependencies import CurrentUser, DbSession
 from app.repositories.conversation_repository import ConversationSummary
-from app.schemas.chat import ConversationRead, MessageRead
+from app.schemas.chat import ConversationRead, FeedbackRequest, MessageRead
 from app.schemas.common import Page
 from app.services.chat_service import ChatService
 
@@ -49,6 +49,15 @@ def list_messages(
     """Messages oldest first; each assistant message carries its citations."""
     messages, total = ChatService(db).list_messages(user, conversation_id, limit=limit, offset=offset)
     return Page[MessageRead](items=[MessageRead.from_message(m) for m in messages], total=total, limit=limit, offset=offset)
+
+
+@router.put("/{conversation_id}/messages/{message_id}/feedback", response_model=MessageRead)
+def set_message_feedback(
+    conversation_id: uuid.UUID, message_id: uuid.UUID, body: FeedbackRequest, user: CurrentUser, db: DbSession
+) -> MessageRead:
+    """Rate an answer (1 = helpful, -1 = not helpful, null = clear). PUT: sending
+    the same rating twice is harmless (idempotent)."""
+    return MessageRead.from_message(ChatService(db).set_feedback(user, conversation_id, message_id, body.rating))
 
 
 @router.delete("/{conversation_id}", status_code=status.HTTP_204_NO_CONTENT)

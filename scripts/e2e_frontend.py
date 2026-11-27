@@ -91,6 +91,32 @@ def main() -> int:
         expect(page).to_have_url(re.compile(r"/chat/[0-9a-f-]{36}$"))
         ok("answer '24 days' with citation e2e-handbook.pdf p. 1; URL now /chat/<conversation id>")
 
+        # 4b. sources -> in-app PDF viewer at the cited page
+        answer.get_by_role("button", name="View page").first.click()
+        viewer = page.get_by_role("dialog")
+        expect(viewer).to_contain_text("Page 1")
+        expect(viewer.locator("iframe")).to_have_attribute("src", re.compile(r"^blob:.*#page=1$"))
+        page.screenshot(path=shots / "03a-viewer.png")
+        viewer.get_by_role("button", name="Close viewer").click()
+        expect(viewer).to_have_count(0)
+        ok("'View page' opens the PDF viewer at page 1 (blob URL, allowed by the CSP)")
+
+        # 4c. rating survives a reload (also proves the silent login via refresh cookie)
+        answer.get_by_role("button", name="Helpful", exact=True).click()
+        expect(answer.get_by_role("button", name="Helpful", exact=True)).to_have_attribute("aria-pressed", "true")
+        page.wait_for_timeout(500)
+        page.reload()
+        answer = page.locator("div.rounded-bl-sm").last
+        expect(answer.get_by_role("button", name="Helpful", exact=True)).to_have_attribute("aria-pressed", "true")
+        ok("👍 saved; after a full reload the user is still logged in and the rating is shown")
+
+        # 4d. regenerate replaces the last answer (still one answer on screen)
+        answer.get_by_role("button", name=re.compile("Regenerate")).click()
+        expect(page.get_by_role("button", name="Stop generating")).to_have_count(0, timeout=60_000)
+        expect(page.locator("div.rounded-bl-sm")).to_have_count(1)
+        expect(page.locator("div.rounded-bl-sm").last).to_contain_text("24")
+        ok("regenerate produced a fresh answer in place of the old one")
+
         # 5. follow-up uses the conversation history
         page.get_by_label("Your question").fill("And sick leave?")
         page.keyboard.press("Enter")
@@ -103,6 +129,16 @@ def main() -> int:
         expect(page.locator("div.rounded-bl-sm").nth(2)).to_contain_text("do not contain enough information")
         ok("unrelated question -> 'documents do not contain enough information'")
         page.screenshot(path=shots / "03-chat.png", full_page=True)
+
+        # 6b. stop: nothing is saved, the question goes back into the input box
+        page.get_by_label("Your question").fill("Summarise the remote work rules in detail")
+        page.keyboard.press("Enter")
+        page.get_by_role("button", name="Stop generating").click()
+        expect(page.get_by_text("Stopped. The partial answer was not saved.")).to_be_visible()
+        expect(page.get_by_label("Your question")).to_have_value("Summarise the remote work rules in detail")
+        expect(page.locator("div.rounded-bl-sm")).to_have_count(3)
+        page.get_by_label("Your question").fill("")
+        ok("Stop aborts the stream; nothing saved, question restored to the input")
 
         # 7. history page lists the conversation; reopening restores messages
         page.get_by_role("link", name="History").click()

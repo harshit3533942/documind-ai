@@ -51,7 +51,8 @@ def ask(
     * `document_ids` -> search only these documents
     """
     return _response(*ChatService(db, embedder, llm, reranker).ask(
-        user, question=body.question, conversation_id=body.conversation_id, document_ids=body.document_ids
+        user, question=body.question, conversation_id=body.conversation_id, document_ids=body.document_ids,
+        regenerate=body.regenerate,
     ))
 
 
@@ -77,7 +78,8 @@ def ask_stream(
     """
     service = ChatService(db, embedder, llm, reranker)
     ctx = service.start_ask(
-        user, question=body.question, conversation_id=body.conversation_id, document_ids=body.document_ids
+        user, question=body.question, conversation_id=body.conversation_id, document_ids=body.document_ids,
+        regenerate=body.regenerate,
     )
 
     def events() -> Iterator[str]:

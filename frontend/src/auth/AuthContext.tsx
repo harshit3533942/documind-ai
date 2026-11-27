@@ -19,6 +19,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   // On start the access token (memory only) is gone: the refresh cookie, if the
   // user has a valid session, buys a new one ("silent login").
   useEffect(() => {
+    if (!tokenStore.mayHaveSession()) {
+      setLoading(false);
+      return;
+    }
     refreshSession()
       .then((ok) => (ok ? api.me().then(setUser) : undefined))
       .catch(() => tokenStore.clear())

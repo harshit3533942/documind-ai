@@ -1,8 +1,8 @@
 import uuid
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from app.models import Message
 from app.models.enums import MessageRole
@@ -17,6 +17,18 @@ class AskRequest(BaseModel):
         default=None, max_length=MAX_DOCUMENT_SELECTION,
         description="Restrict the search to these documents (default: all your completed documents)",
     )
+    regenerate: bool = Field(
+        default=False,
+        description="Replace the conversation's LAST answer: its question/answer pair is removed and "
+        "the question answered again, bypassing the answer cache. Needs `conversation_id`, and "
+        "`question` must be that last question.",
+    )
+
+    @model_validator(mode="after")
+    def regenerate_needs_conversation(self) -> "AskRequest":
+        if self.regenerate and self.conversation_id is None:
+            raise ValueError("regenerate requires conversation_id")
+        return self
 
     @field_validator("question")
     @classmethod
@@ -55,6 +67,7 @@ class MessageRead(BaseModel):
     found: bool | None = None
     mode: str | None = None  # "llm" | "extractive" | "none"
     grounded: bool | None = None
+    feedback: Literal[-1, 1] | None = None  # the owner's rating of an answer
     # user messages
     document_ids: list[uuid.UUID] | None = None
 
@@ -65,8 +78,12 @@ class MessageRead(BaseModel):
             id=m.id, role=m.role, content=m.content, created_at=m.created_at,
             citations=[CitationRead(**c) for c in meta.get("citations", [])],
             found=meta.get("found"), mode=meta.get("mode"), grounded=meta.get("grounded"),
-            document_ids=meta.get("document_ids"),
+            document_ids=meta.get("document_ids"), feedback=m.feedback,
         )
+
+
+class FeedbackRequest(BaseModel):
+    rating: Literal[-1, 1] | None = Field(description="1 = helpful, -1 = not helpful, null = remove the rating")
 
 
 class AskResponse(BaseModel):

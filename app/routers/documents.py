@@ -5,6 +5,7 @@ import uuid
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, File, Query, Response, UploadFile, status
+from fastapi.responses import FileResponse
 
 from app.core.dependencies import CurrentUser, DbSession, Queue, Storage
 from app.core.rate_limit import limit_by_user
@@ -70,6 +71,23 @@ def get_document_status(
     document_id: uuid.UUID, user: CurrentUser, db: DbSession, storage: Storage
 ) -> DocumentStatusRead:
     return DocumentStatusRead.model_validate(DocumentService(db, storage).get(user, document_id))
+
+
+@router.get(
+    "/{document_id}/file", response_class=FileResponse,
+    responses={200: {"content": {"application/pdf": {}}, "description": "The original uploaded file"}},
+)
+def download_document_file(
+    document_id: uuid.UUID, user: CurrentUser, db: DbSession, storage: Storage
+) -> FileResponse:
+    """The original file, for the in-app viewer (opened at a cited page).
+    `inline` so the browser displays it instead of downloading; `private`
+    caching because it is user data."""
+    document, path = DocumentService(db, storage).file_for(user, document_id)
+    return FileResponse(
+        path, media_type=document.mime_type, filename=document.filename,
+        content_disposition_type="inline", headers={"Cache-Control": "private, max-age=300"},
+    )
 
 
 @router.get("/{document_id}/chunks", response_model=Page[DocumentChunkRead])

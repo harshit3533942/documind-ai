@@ -111,6 +111,17 @@ class ConversationRepository:
         ).all()
         return list(rows), total
 
+    def get_message(self, conversation_id: uuid.UUID, message_id: uuid.UUID) -> Message | None:
+        """Callers must have checked that the user owns `conversation_id`."""
+        return self.db.scalar(
+            select(Message).where(Message.id == message_id, Message.conversation_id == conversation_id)
+        )
+
+    def delete_messages(self, messages: list[Message]) -> None:
+        for m in messages:
+            self.db.delete(m)
+        self.db.flush()
+
     def recent_messages(self, conversation_id: uuid.UUID, limit: int) -> list[Message]:
         """The last `limit` messages, oldest first (conversation context for follow-ups)."""
         rows = self.db.scalars(

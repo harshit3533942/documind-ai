@@ -61,6 +61,7 @@ export interface Message {
   mode: "llm" | "extractive" | "none" | null;
   grounded: boolean | null;
   document_ids: string[] | null;
+  feedback: 1 | -1 | null; // the user's rating of an answer
 }
 
 export interface AskResponse {

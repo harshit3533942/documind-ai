@@ -1,7 +1,7 @@
 import uuid
 from typing import TYPE_CHECKING, Any
 
-from sqlalchemy import ForeignKey, Index, Text
+from sqlalchemy import CheckConstraint, ForeignKey, Index, SmallInteger, Text
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -31,9 +31,15 @@ class Message(UUIDPrimaryKeyMixin, CreatedAtMixin, Base):
     # separate citations table would add JOINs without real benefit.
     sources: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
 
+    # The owner's rating of an assistant answer: +1 helpful, -1 not helpful,
+    # NULL not rated. A real column (not inside `sources`) so it can be counted
+    # and filtered cheaply for quality dashboards and the evaluation set.
+    feedback: Mapped[int | None] = mapped_column(SmallInteger)
+
     conversation: Mapped["Conversation"] = relationship(back_populates="messages")
 
     __table_args__ = (
         # Load a conversation's messages in chronological order.
         Index("ix_messages_conversation_id_created_at", "conversation_id", "created_at"),
+        CheckConstraint("feedback IS NULL OR feedback IN (-1, 1)", name="feedback_valid"),
     )

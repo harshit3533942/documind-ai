@@ -69,6 +69,7 @@ class AskContext:
     document_ids: list[uuid.UUID] | None
     conversation: Conversation
     history: list[ChatMessage]
+    regenerate: bool = False  # bypass the answer cache
 
 
 class ChatService:
@@ -95,6 +96,7 @@ class ChatService:
         question: str,
         conversation_id: uuid.UUID | None = None,
         document_ids: Sequence[uuid.UUID] | None = None,
+        regenerate: bool = False,
     ) -> "AskContext":
         """Steps 1-3: validation, conversation, history. Nothing is committed yet."""
         if self.embedder is None:
@@ -104,6 +106,8 @@ class ChatService:
 
         if conversation_id is not None:
             conversation = self.get_conversation(user, conversation_id)
+            if regenerate:
+                self._drop_last_exchange(conversation, question)
             history = [
                 ChatMessage(m.role.value, m.content)
                 for m in self.conversations.recent_messages(conversation.id, HISTORY_MESSAGES)
@@ -111,7 +115,24 @@ class ChatService:
         else:
             conversation = self.conversations.create(user.id, make_title(question))
             history = []
-        return AskContext(user, question, list(document_ids) if document_ids else None, conversation, history)
+        return AskContext(
+            user, question, list(document_ids) if document_ids else None, conversation, history, regenerate
+        )
+
+    def _drop_last_exchange(self, conversation: Conversation, question: str) -> None:
+        """Regenerate: remove the last question/answer pair so the new answer
+        takes its place (and is not shown its own predecessor as history). Only
+        flushed - if answering fails or the client disconnects, the rollback
+        brings the old pair back."""
+        last = self.conversations.recent_messages(conversation.id, 2)
+        if (
+            len(last) != 2
+            or last[0].role != MessageRole.USER
+            or last[1].role != MessageRole.ASSISTANT
+            or " ".join(last[0].content.split()) != question
+        ):
+            raise ConflictError("Only the last answer can be regenerated, with its original question")
+        self.conversations.delete_messages(last)
 
     def ask(
         self,
@@ -120,10 +141,13 @@ class ChatService:
         question: str,
         conversation_id: uuid.UUID | None = None,
         document_ids: Sequence[uuid.UUID] | None = None,
+        regenerate: bool = False,
     ) -> tuple[Conversation, Message, Message, RagAnswer]:
-        ctx = self.start_ask(user, question=question, conversation_id=conversation_id, document_ids=document_ids)
+        ctx = self.start_ask(
+            user, question=question, conversation_id=conversation_id, document_ids=document_ids, regenerate=regenerate
+        )
         try:
-            result = self._answer(ctx.user, ctx.question, ctx.document_ids, ctx.history)
+            result = self._answer(ctx.user, ctx.question, ctx.document_ids, ctx.history, use_cache=not ctx.regenerate)
         except Exception:
             self.db.rollback()  # do not leave a new, empty conversation behind
             raise
@@ -135,7 +159,9 @@ class ChatService:
         away mid-stream, nothing is saved (the transaction is rolled back)."""
         try:
             result: RagAnswer | None = None
-            for kind, payload in self._answer_stream(ctx.user, ctx.question, ctx.document_ids, ctx.history):
+            for kind, payload in self._answer_stream(
+                ctx.user, ctx.question, ctx.document_ids, ctx.history, use_cache=not ctx.regenerate
+            ):
                 if kind == "final":
                     result = payload  # type: ignore[assignment]
                 else:
@@ -193,15 +219,17 @@ class ChatService:
         return key, result
 
     def _answer(
-        self, user: User, question: str, document_ids: Sequence[uuid.UUID] | None, history: list[ChatMessage]
+        self, user: User, question: str, document_ids: Sequence[uuid.UUID] | None, history: list[ChatMessage],
+        *, use_cache: bool = True,
     ) -> RagAnswer:
         """RAG, with the Redis answer cache for first questions of a conversation.
-        Follow-ups depend on history, so they are never cached."""
+        Follow-ups depend on history, so they are never cached. Regenerate skips
+        the lookup (the user wants a NEW answer) but stores the fresh result."""
         rag = self._rag()
         if history:
             return rag.answer(user_id=user.id, question=question, document_ids=document_ids, history=history)
         key, hit = self._cache_lookup(user, question, document_ids)
-        if hit is not None:
+        if hit is not None and use_cache:
             return hit
         result = rag.answer(user_id=user.id, question=question, document_ids=document_ids)
         if key is not None and result.llm_error is None:  # never cache a degraded (fallback) answer
@@ -209,7 +237,8 @@ class ChatService:
         return result
 
     def _answer_stream(
-        self, user: User, question: str, document_ids: Sequence[uuid.UUID] | None, history: list[ChatMessage]
+        self, user: User, question: str, document_ids: Sequence[uuid.UUID] | None, history: list[ChatMessage],
+        *, use_cache: bool = True,
     ) -> Iterator[tuple[str, object]]:
         """Streaming twin of _answer() - same caching rules."""
         rag = self._rag()
@@ -217,7 +246,7 @@ class ChatService:
             yield from rag.answer_stream(user_id=user.id, question=question, document_ids=document_ids, history=history)
             return
         key, hit = self._cache_lookup(user, question, document_ids)
-        if hit is not None:
+        if hit is not None and use_cache:
             yield from text_pieces(hit.answer)
             yield "final", hit
             return
@@ -289,6 +318,18 @@ class ChatService:
     def list_messages(self, user: User, conversation_id: uuid.UUID, *, limit: int, offset: int) -> tuple[list[Message], int]:
         conversation = self.get_conversation(user, conversation_id)
         return self.conversations.list_messages(conversation.id, limit=limit, offset=offset)
+
+    def set_feedback(self, user: User, conversation_id: uuid.UUID, message_id: uuid.UUID, rating: int | None) -> Message:
+        conversation = self.get_conversation(user, conversation_id)  # 404 unless the owner
+        message = self.conversations.get_message(conversation.id, message_id)
+        if message is None:
+            raise NotFoundError("Message not found")
+        if message.role != MessageRole.ASSISTANT:
+            raise ConflictError("Only answers can be rated")
+        message.feedback = rating
+        self.db.commit()
+        logger.info("Feedback %s on message %s by user %s", rating, message.id, user.id)
+        return message
 
     def delete_conversation(self, user: User, conversation_id: uuid.UUID) -> None:
         conversation = self.get_conversation(user, conversation_id)
