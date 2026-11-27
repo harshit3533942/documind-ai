@@ -26,6 +26,7 @@ class DocumentRead(BaseModel):
     summary: str | None = None
     suggested_questions: list[str] | None = None
     summarized_at: datetime | None = None
+    deleted_at: datetime | None = None  # set = in the trash
 
 
 class DocumentChunkRead(BaseModel):

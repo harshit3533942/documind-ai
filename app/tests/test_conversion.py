@@ -231,7 +231,7 @@ def test_duplicate_is_detected_on_the_original_file(client, alice) -> None:
 def test_delete_removes_pdf_and_sidecar(client, alice, storage, db_session) -> None:
     resp = upload(client, alice, "notes.md", b"# Notes\n\nSome notes.", "text/markdown")
     _, path = stored(db_session, storage, resp.json()["id"])
-    assert client.delete(f"{DOCS}/{resp.json()['id']}", headers=alice).status_code == 204
+    assert client.delete(f"{DOCS}/{resp.json()['id']}", headers=alice, params={"permanent": "true"}).status_code == 204
     assert not path.exists() and not sidecar_path(path).exists()
 
 

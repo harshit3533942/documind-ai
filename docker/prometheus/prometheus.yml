@@ -1,0 +1,12 @@
+# Prometheus scrape config (docker compose --profile monitoring up -d).
+# The API's /metrics is reachable only inside the compose network (nginx does
+# not route it). If METRICS_TOKEN is set, add:  authorization: {credentials: <token>}
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: documind-api
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["api:8000"]

@@ -158,6 +158,8 @@ class RagAnswer:
     llm_error: str | None = None     # set when the LLM failed and we fell back
     timings_ms: dict[str, float] = field(default_factory=dict)
     cached: bool = False             # served from the Redis answer cache
+    # Semantic cache hit: similarity to the earlier question whose answer was reused.
+    cache_similarity: float | None = None
 
     def to_dict(self) -> dict:
         from dataclasses import asdict

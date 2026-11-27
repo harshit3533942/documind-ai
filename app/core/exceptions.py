@@ -68,6 +68,19 @@ class UnprocessableError(AppError):
     code = "unprocessable"
 
 
+class QuotaExceededError(AppError):
+    """The account's quota is used up. 403 for storage / document count (it
+    will not succeed by waiting), 429 for daily limits (it will, tomorrow)."""
+
+    status_code = status.HTTP_403_FORBIDDEN
+    code = "quota_exceeded"
+
+    def __init__(self, message: str, headers: dict[str, str] | None = None, status_code: int | None = None) -> None:
+        super().__init__(message, headers)
+        if status_code is not None:
+            self.status_code = status_code
+
+
 class ServiceUnavailableError(AppError):
     """A dependency (broker, mail server) is down; retrying later can succeed."""
 

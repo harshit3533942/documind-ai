@@ -6,17 +6,22 @@
 - /health/ready : can we serve traffic right now? (checks the database)
 """
 
+import hmac
 from datetime import UTC, datetime
+from typing import Annotated
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Header, Response
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import JSONResponse
 
+from app.core import metrics
 from app.core.config import get_settings
+from app.core.exceptions import NotFoundError, UnauthorizedError
 from app.database.connection import check_database_connection
 from app.database.redis_client import check_redis_connection
 
 router = APIRouter(prefix="/health", tags=["health"])
+metrics_router = APIRouter(tags=["monitoring"])
 
 
 @router.get("/live")
@@ -42,3 +47,19 @@ async def readiness() -> JSONResponse:
             "checks": {"database": database, "redis": redis_status},
         },
     )
+
+
+@metrics_router.get("/metrics", include_in_schema=False)
+def prometheus_metrics(authorization: Annotated[str | None, Header()] = None) -> Response:
+    """Prometheus scrape endpoint. Internal: nginx does not route it, and with
+    METRICS_TOKEN set it also requires `Authorization: Bearer <token>`."""
+    settings = get_settings()
+    if not settings.metrics_enabled:
+        raise NotFoundError("Not found")
+    if settings.metrics_token is not None:
+        expected = f"Bearer {settings.metrics_token.get_secret_value()}"
+        # constant-time comparison: response timing reveals nothing about the token
+        if not hmac.compare_digest((authorization or "").encode(), expected.encode()):
+            raise UnauthorizedError("Invalid metrics token")
+    body, content_type = metrics.render()
+    return Response(body, media_type=content_type)

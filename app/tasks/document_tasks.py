@@ -14,12 +14,14 @@ Every attempt is safe to repeat: the processor's claim step drops duplicate
 deliveries and its single-transaction write never duplicates chunks.
 """
 
+import time
 import uuid
 from typing import Any
 
 from celery.exceptions import SoftTimeLimitExceeded
 from sqlalchemy import update
 
+from app.core import metrics
 from app.core.config import get_settings
 from app.core.dependencies import get_storage
 from app.core.logging import get_logger
@@ -69,6 +71,7 @@ def process_document_task(self: Any, document_id: str, force: bool = False) -> d
     logger.info("Task %s: processing document %s (attempt %d)", self.request.id, doc_id, attempt)
 
     db = _session_factory()
+    started = time.perf_counter()
     try:
         processor = DocumentProcessor(db, _storage_factory(), embedder=_embedder_factory())
         result = processor.process(doc_id, force=force)
@@ -97,6 +100,8 @@ def process_document_task(self: Any, document_id: str, force: bool = False) -> d
     finally:
         db.close()
 
+    if result.status != "skipped":
+        metrics.record_processing(result.status, time.perf_counter() - started, result.total_pages)
     if result.status == "completed":
         enqueue_summary(doc_id)
     return {

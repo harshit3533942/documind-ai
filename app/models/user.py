@@ -2,7 +2,7 @@ from typing import TYPE_CHECKING
 
 from datetime import datetime
 
-from sqlalchemy import Boolean, DateTime, String, true
+from sqlalchemy import Boolean, DateTime, Integer, String, true
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.database.base import Base, CreatedAtMixin, UUIDPrimaryKeyMixin
@@ -28,6 +28,10 @@ class User(UUIDPrimaryKeyMixin, CreatedAtMixin, Base):
     # Set when the user clicks the link in the verification email (or resets
     # their password - that also proves they own the inbox).
     email_verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # Per-user quota overrides (NULL = the default from settings, 0 = unlimited).
+    quota_max_documents: Mapped[int | None] = mapped_column(Integer)
+    quota_max_storage_mb: Mapped[int | None] = mapped_column(Integer)
+    quota_max_questions_per_day: Mapped[int | None] = mapped_column(Integer)
 
     # One user -> many documents / conversations.
     # passive_deletes=True: let PostgreSQL's ON DELETE CASCADE do the work

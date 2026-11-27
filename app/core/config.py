@@ -103,10 +103,25 @@ class Settings(BaseSettings):
     rate_limit_password_reset_per_email: int = 3   # per hour (no inbox flooding)
     rate_limit_verification_email_per_user: int = 3  # per hour
 
+    # --- Quotas per user (0 = unlimited; admins can override per user) ---
+    quota_max_documents: int = Field(default=200, ge=0)
+    quota_max_storage_mb: int = Field(default=1024, ge=0)
+    quota_max_questions_per_day: int = Field(default=300, ge=0)
+    # Deleted documents stay in the trash (restorable) this long, then are purged.
+    trash_retention_days: int = Field(default=30, ge=1, le=365)
+
     # --- Caching (Redis) ---
     cache_enabled: bool = True
     cache_query_embedding_ttl: int = 24 * 3600
     cache_answer_ttl: int = 10 * 60
+    # Semantic answer cache: also reuse the answer of a previous question that
+    # MEANS the same ("how many vacation days do I get?" ~ "how many days of
+    # vacation do I get?"). Threshold = cosine similarity of the two question
+    # embeddings; model specific, calibrated for all-MiniLM-L6-v2 (see
+    # cache_service). Too low serves answers to DIFFERENT questions.
+    semantic_cache_enabled: bool = True
+    semantic_cache_threshold: float = Field(default=0.95, ge=0.5, le=1.0)
+    semantic_cache_max_entries: int = Field(default=50, ge=1, le=1000)  # per user + document scope
 
     # --- Observability ---
     slow_request_ms: int = 1500

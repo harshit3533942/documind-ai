@@ -18,6 +18,7 @@ import uuid
 
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
+from app.core import metrics
 from app.core.config import get_settings
 from app.core.logging import get_logger
 
@@ -86,10 +87,15 @@ class RequestTimingMiddleware:
         incoming = dict(scope["headers"]).get(b"x-request-id", b"").decode("latin-1")
         request_id = incoming if _SAFE_REQUEST_ID.fullmatch(incoming) else uuid.uuid4().hex
         status_holder = {"status": 500}
+        timed = {"seconds": None}
+        track = scope["path"] != "/metrics"  # do not measure the scraper itself
+        if track:
+            metrics.HTTP_IN_PROGRESS.inc()
 
         async def send_wrapper(message: Message) -> None:
             if message["type"] == "http.response.start":
                 status_holder["status"] = message["status"]
+                timed["seconds"] = time.perf_counter() - started
                 elapsed_ms = (time.perf_counter() - started) * 1000
                 headers = list(message.get("headers", []))
                 headers.append((b"x-request-id", request_id.encode()))
@@ -100,6 +106,12 @@ class RequestTimingMiddleware:
         try:
             await self.app(scope, receive, send_wrapper)
         finally:
+            if track:
+                metrics.HTTP_IN_PROGRESS.dec()
+                # Latency = time to the first byte: a 30 s answer stream is
+                # "fast" if its headers (and first token) came quickly.
+                seconds = timed["seconds"] if timed["seconds"] is not None else time.perf_counter() - started
+                metrics.observe_request(scope["method"], metrics.route_label(scope), status_holder["status"], seconds)
             elapsed_ms = (time.perf_counter() - started) * 1000
             log = logger.warning if elapsed_ms > get_settings().slow_request_ms else logger.info
             log(

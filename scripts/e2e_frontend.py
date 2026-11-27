@@ -220,6 +220,15 @@ def main() -> int:
         expect(page.get_by_text("Leave questions", exact=True)).to_be_visible()
         ok("search finds text inside messages; rename persists; Markdown export downloads with citations")
 
+        # 7c. semantic cache: a paraphrase in a NEW conversation reuses the earlier answer
+        page.goto(f"{args.base}/chat")
+        page.get_by_label("Your question").fill("How many days of vacation do I get?")
+        page.keyboard.press("Enter")
+        reused = page.locator("div.rounded-bl-sm").last
+        expect(reused).to_contain_text("24")
+        expect(reused).to_contain_text(re.compile(r"Reused answer to a similar question \(\d+% match\)"))
+        ok("paraphrased question answered from the semantic cache (similarity shown)")
+
         # 8. document library + dashboard
         page.get_by_label("Main").get_by_role("link", name="Documents").click()
         expect(page.get_by_text("e2e-handbook.pdf")).to_be_visible()
@@ -273,13 +282,30 @@ def main() -> int:
             expect(deletes).to_have_count(remaining - 1)
         expect(page.get_by_text("No conversations yet")).to_be_visible()
         page.get_by_label("Main").get_by_role("link", name="Documents").click()
+        expect(page.get_by_label("Usage")).to_contain_text("Documents4 of")
         expect(deletes).to_have_count(4)
-        for remaining in range(4, 0, -1):
-            page.once("dialog", lambda d: d.accept())
+        for remaining in range(4, 0, -1):  # Delete = move to the trash (no confirmation needed)
             deletes.first.click()
             expect(deletes).to_have_count(remaining - 1)
         expect(page.get_by_text("No documents yet")).to_be_visible()
-        ok("deleted conversations and documents through the UI")
+        ok("deleted conversations; documents moved to the trash")
+
+        # 9b. trash: restore one (searchable again), then delete everything forever
+        page.get_by_role("tab", name="Trash (4)").click()
+        page.get_by_role("button", name="Restore").first.click()
+        expect(page.get_by_role("tab", name="Trash (3)")).to_be_visible()
+        page.get_by_role("tab", name="Library").click()
+        expect(page.get_by_role("button", name="Delete")).to_have_count(1)
+        page.get_by_role("button", name="Delete").first.click()
+        page.get_by_role("tab", name="Trash (4)").click()
+        forever = page.get_by_role("button", name="Delete forever")
+        for remaining in range(4, 0, -1):
+            page.once("dialog", lambda d: d.accept())
+            forever.first.click()
+            expect(forever).to_have_count(remaining - 1)
+        expect(page.get_by_text("The trash is empty")).to_be_visible()
+        expect(page.get_by_label("Usage")).to_contain_text("Documents0 of")
+        ok("trash: restore works; 'Delete forever' empties it and frees the quota")
 
         # 10. logout -> protected again
         page.get_by_role("button", name="Log out").click()

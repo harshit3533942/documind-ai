@@ -63,6 +63,11 @@ celery_app.conf.update(
             "task": "documents.requeue_stale",
             "schedule": 300.0,  # every 5 minutes
         },
+        "purge-trash": {
+            "task": "maintenance.purge_trash",
+            "schedule": 6 * 3600.0,  # every 6 hours
+            "options": {"queue": "documents"},
+        },
         "purge-refresh-tokens": {
             "task": "maintenance.purge_refresh_tokens",
             "schedule": 24 * 3600.0,  # daily

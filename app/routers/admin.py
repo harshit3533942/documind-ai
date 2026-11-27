@@ -22,10 +22,12 @@ from app.core.logging import get_logger
 from app.models import DocumentStatus, UserRole
 from app.repositories.document_repository import DocumentRepository
 from app.repositories.user_repository import UserRepository
+from app.schemas.account import QuotaSummary, QuotaUpdate
 from app.schemas.admin import DocumentStats, FailedDocument
 from app.schemas.common import Page
 from app.schemas.document import DocumentStatusRead
 from app.schemas.user import UserRead
+from app.services import quota_service
 from app.services.document_processing_service import mark_queued
 
 logger = get_logger(__name__)
@@ -134,3 +136,27 @@ def retry_failed_document(document_id: uuid.UUID, db: DbSession, queue: Queue) -
     db.refresh(document)
     logger.info("Admin retry queued for document %s", document_id)
     return DocumentStatusRead.model_validate(document)
+
+
+@router.patch("/users/{user_id}/quota", response_model=QuotaSummary)
+def set_user_quota(user_id: uuid.UUID, body: QuotaUpdate, db: DbSession) -> QuotaSummary:
+    """Override one user's limits (null = default from settings, 0 = unlimited).
+    Only the fields sent are changed."""
+    user = UserRepository(db).get_by_id(user_id)
+    if user is None:
+        raise NotFoundError("User not found")
+    fields = {"max_documents": "quota_max_documents", "max_storage_mb": "quota_max_storage_mb",
+              "max_questions_per_day": "quota_max_questions_per_day"}
+    for field in body.model_fields_set:
+        setattr(user, fields[field], getattr(body, field))
+    db.commit()
+    logger.info("Admin changed quota of user %s: %s", user.id, body.model_dump(exclude_unset=True))
+    return QuotaSummary(**quota_service.summary(db, user))
+
+
+@router.get("/users/{user_id}/quota", response_model=QuotaSummary)
+def get_user_quota(user_id: uuid.UUID, db: DbSession) -> QuotaSummary:
+    user = UserRepository(db).get_by_id(user_id)
+    if user is None:
+        raise NotFoundError("User not found")
+    return QuotaSummary(**quota_service.summary(db, user))

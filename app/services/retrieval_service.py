@@ -138,6 +138,7 @@ def search_chunks(
     conditions = [
         DocumentChunk.user_id == user_id,            # data isolation
         Document.status == DocumentStatus.COMPLETED,  # never half-processed docs
+        Document.deleted_at.is_(None),                # never documents in the trash
         # Vectors from different models live in different "spaces";
         # comparing them would return garbage.
         Document.embedding_model == embedder.model_name,

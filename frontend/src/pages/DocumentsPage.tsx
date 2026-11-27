@@ -1,8 +1,9 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import { api } from "../api/client";
 import type { DocumentItem } from "../api/types";
 import { Button, Card, EmptyState, ErrorBanner, PageHeader, ProcessingProgress, Spinner, StatusBadge, formatBytes, timeAgo } from "../components/ui";
+import { UsageCard } from "../components/Usage";
 import { useDocuments } from "../hooks";
 
 /** The worker writes the summary a few seconds after processing; until then show "Generating…". */
@@ -24,17 +25,35 @@ export function DocumentsPage() {
     }
   };
 
-  const remove = async (doc: DocumentItem) => {
-    if (!window.confirm(`Delete "${doc.filename}"? Its text and embeddings are removed too. This cannot be undone.`)) return;
+  const [view, setView] = useState<"library" | "trash">("library");
+  const [trash, setTrash] = useState<DocumentItem[] | null>(null);
+  const [usageKey, setUsageKey] = useState(0);
+
+  const loadTrash = () => api.listTrash().then((p) => setTrash(p.items)).catch(() => setTrash([]));
+  useEffect(() => { void loadTrash(); }, []);
+
+  const act = async (doc: DocumentItem, action: () => Promise<unknown>, failure: string) => {
     setBusyId(doc.id);
     try {
-      await api.deleteDocument(doc.id);
-      await refresh();
+      await action();
+      await Promise.all([refresh(), loadTrash()]);
+      setUsageKey((k) => k + 1);
     } catch (err) {
-      setActionError(err instanceof Error ? err.message : "Delete failed");
+      setActionError(err instanceof Error ? err.message : failure);
     } finally {
       setBusyId(null);
     }
+  };
+
+  const remove = (doc: DocumentItem) =>
+    act(doc, () => api.deleteDocument(doc.id), "Could not move to the trash");
+
+  const restore = (doc: DocumentItem) =>
+    act(doc, () => api.restoreDocument(doc.id), "Restore failed");
+
+  const destroy = (doc: DocumentItem) => {
+    if (!window.confirm(`Delete "${doc.filename}" forever? Its file, text and embeddings are removed. This cannot be undone.`)) return;
+    return act(doc, () => api.deleteDocument(doc.id, true), "Delete failed");
   };
 
   const reprocess = async (doc: DocumentItem) => {
@@ -61,7 +80,39 @@ export function DocumentsPage() {
         <ErrorBanner message={actionError} onClose={() => setActionError(null)} />
       </div>
 
-      {loading ? <Spinner label="Loading documents…" /> : documents.length === 0 ? (
+      <div className="mb-4 flex flex-wrap items-start justify-between gap-4">
+        <div className="flex gap-1 rounded-lg border border-slate-200 bg-white p-1" role="tablist">
+          {(["library", "trash"] as const).map((v) => (
+            <button
+              key={v} role="tab" aria-selected={view === v} onClick={() => setView(v)}
+              className={`rounded-md px-3 py-1.5 text-sm font-medium ${view === v ? "bg-brand-50 text-brand-800 ring-1 ring-brand-200" : "text-ink-muted hover:bg-slate-50"}`}
+            >
+              {v === "library" ? "Library" : `Trash${trash?.length ? ` (${trash.length})` : ""}`}
+            </button>
+          ))}
+        </div>
+        <div className="w-full max-w-sm"><UsageCard refreshKey={usageKey} /></div>
+      </div>
+
+      {view === "trash" ? (
+        trash === null ? <Spinner label="Loading trash…" /> : trash.length === 0 ? (
+          <EmptyState title="The trash is empty">Deleted documents stay here for 30 days and can be restored.</EmptyState>
+        ) : (
+          <Card className="divide-y divide-slate-100">
+            <p className="px-5 py-3 text-xs text-ink-soft">Documents in the trash are not searched. They are deleted for good 30 days after deletion.</p>
+            {trash.map((d) => (
+              <div key={d.id} className="flex flex-wrap items-center gap-3 px-5 py-3">
+                <div className="min-w-0 flex-1">
+                  <p className="truncate font-medium text-ink">{d.filename}</p>
+                  <p className="text-xs text-ink-soft">Deleted {d.deleted_at ? timeAgo(d.deleted_at) : ""} · {formatBytes(d.file_size)}</p>
+                </div>
+                <Button variant="secondary" className="px-2.5 py-1 text-xs" disabled={busyId === d.id} onClick={() => void restore(d)}>Restore</Button>
+                <Button variant="danger" className="px-2.5 py-1 text-xs" disabled={busyId === d.id} onClick={() => void destroy(d)}>Delete forever</Button>
+              </div>
+            ))}
+          </Card>
+        )
+      ) : loading ? <Spinner label="Loading documents…" /> : documents.length === 0 ? (
         <EmptyState title="No documents yet"><Link to="/upload" className="text-brand-700 underline">Upload your first document</Link> to get started.</EmptyState>
       ) : (
         <Card className="mt-4 overflow-hidden">
@@ -127,7 +178,7 @@ export function DocumentsPage() {
                             {d.status === "failed" ? "Retry" : "Reprocess"}
                           </Button>
                         )}
-                        <Button variant="danger" className="px-2.5 py-1 text-xs" disabled={busyId === d.id} onClick={() => remove(d)}>Delete</Button>
+                        <Button variant="danger" className="px-2.5 py-1 text-xs" disabled={busyId === d.id} onClick={() => void remove(d)} title="Move to the trash (restorable for 30 days)">Delete</Button>
                       </div>
                     </td>
                   </tr>

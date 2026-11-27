@@ -48,6 +48,9 @@ class Document(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     summary: Mapped[str | None] = mapped_column(Text)
     suggested_questions: Mapped[list[str] | None] = mapped_column(JSONB)
     summarized_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # Soft delete: set = in the trash. Hidden from search, chat and lists;
+    # restorable until purged (TRASH_RETENTION_DAYS).
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
     owner: Mapped["User"] = relationship(back_populates="documents")
     chunks: Mapped[list["DocumentChunk"]] = relationship(
@@ -64,6 +67,8 @@ class Document(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         Index("ix_documents_status", "status"),
         # Duplicate-upload lookup per user.
         Index("ix_documents_user_id_file_hash", "user_id", "file_hash"),
+        # Purge job: trashed documents older than the retention period.
+        Index("ix_documents_deleted_at", "deleted_at", postgresql_where="deleted_at IS NOT NULL"),
     )
 
     def __repr__(self) -> str:

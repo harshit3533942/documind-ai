@@ -21,6 +21,9 @@ os.environ["RATE_LIMIT_ENABLED"] = "false"
 # The cross-encoder is tested explicitly (test_retrieval.py); elsewhere RAG must
 # not download/load a second model.
 os.environ["RAG_RERANK_ENABLED"] = "false"
+# The semantic answer cache is tested explicitly (test_semantic_cache.py);
+# elsewhere a similar-looking question must get its own answer.
+os.environ["SEMANTIC_CACHE_ENABLED"] = "false"
 
 import uuid  # noqa: E402
 from collections.abc import Callable, Iterator  # noqa: E402

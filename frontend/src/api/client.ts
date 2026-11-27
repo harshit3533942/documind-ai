@@ -1,7 +1,7 @@
 // Typed client for the FastAPI backend. All URLs are relative ("/api/v1/..."):
 // the Vite dev server (and nginx in production) proxies them to FastAPI.
 import type {
-  AskResponse, Conversation, DocumentItem, DocumentStatus, Message, Page, Token, User,
+  AskResponse, Conversation, DocumentItem, DocumentStatus, Message, Page, QuotaSummary, Token, User,
 } from "./types";
 
 const BASE = "/api/v1";
@@ -170,7 +170,12 @@ export const api = {
   listDocuments: (params: { limit?: number; offset?: number; status?: DocumentStatus } = {}) =>
     request<Page<DocumentItem>>(`/documents${qs(params)}`),
   getDocument: (id: string) => request<DocumentItem>(`/documents/${id}`),
-  deleteDocument: (id: string) => request<void>(`/documents/${id}`, { method: "DELETE" }),
+  /** Moves to the trash; `permanent` deletes for good (also from the trash). */
+  deleteDocument: (id: string, permanent = false) =>
+    request<void>(`/documents/${id}${permanent ? "?permanent=true" : ""}`, { method: "DELETE" }),
+  listTrash: () => request<Page<DocumentItem>>("/documents/trash?limit=100"),
+  restoreDocument: (id: string) => request<DocumentItem>(`/documents/${id}/restore`, { method: "POST" }),
+  usage: () => request<QuotaSummary>("/account/usage"),
   reprocessDocument: (id: string) => request<DocumentItem>(`/documents/${id}/reprocess`, { method: "POST" }),
   requestSummary: (id: string) => request<DocumentItem>(`/documents/${id}/summary`, { method: "POST" }),
 

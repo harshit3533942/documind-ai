@@ -41,6 +41,12 @@ export interface DocumentItem {
   summary?: string | null; // generated in the background after processing
   suggested_questions?: string[] | null;
   summarized_at?: string | null;
+  deleted_at?: string | null; // set = in the trash
+}
+
+export interface QuotaSummary {
+  limits: { max_documents: number; max_storage_bytes: number; max_questions_per_day: number }; // 0 = unlimited
+  usage: { documents: number; storage_bytes: number; trashed_documents: number; questions_today: number };
 }
 
 export interface Citation {
@@ -67,6 +73,8 @@ export interface Message {
   grounded: boolean | null;
   document_ids: string[] | null;
   feedback: 1 | -1 | null; // the user's rating of an answer
+  cached?: boolean | null; // reused from the answer cache
+  cache_similarity?: number | null; // semantic cache: similarity to the earlier question
 }
 
 export interface AskResponse {

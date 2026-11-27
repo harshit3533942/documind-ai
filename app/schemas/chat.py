@@ -68,6 +68,8 @@ class MessageRead(BaseModel):
     mode: str | None = None  # "llm" | "extractive" | "none"
     grounded: bool | None = None
     feedback: Literal[-1, 1] | None = None  # the owner's rating of an answer
+    cached: bool | None = None  # answer reused from the cache
+    cache_similarity: float | None = None  # semantic cache: similarity to the earlier question
     # user messages
     document_ids: list[uuid.UUID] | None = None
 
@@ -79,6 +81,7 @@ class MessageRead(BaseModel):
             citations=[CitationRead(**c) for c in meta.get("citations", [])],
             found=meta.get("found"), mode=meta.get("mode"), grounded=meta.get("grounded"),
             document_ids=meta.get("document_ids"), feedback=m.feedback,
+            cached=meta.get("cached"), cache_similarity=meta.get("cache_similarity"),
         )
 
 
@@ -94,6 +97,9 @@ class AskResponse(BaseModel):
     search_query: str
     timings_ms: dict[str, float]
     cached: bool = False
+    # Set when the answer came from the SEMANTIC cache: similarity (0-1) of
+    # this question to the earlier one whose answer was reused.
+    cache_similarity: float | None = None
 
 
 class ConversationRead(BaseModel):

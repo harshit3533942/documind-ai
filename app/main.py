@@ -17,7 +17,7 @@ from app.core.exceptions import register_exception_handlers
 from app.core.logging import get_logger, setup_logging
 from app.core.middleware import RequestTimingMiddleware, SecurityHeadersMiddleware
 from app.database.connection import engine
-from app.routers import admin, auth, chat, conversations, documents, health
+from app.routers import account, admin, auth, chat, conversations, documents, health
 
 settings = get_settings()
 setup_logging(settings.log_level)
@@ -95,11 +95,13 @@ def create_app() -> FastAPI:
 
     register_exception_handlers(app)
     app.include_router(health.router)
+    app.include_router(health.metrics_router)
     app.include_router(auth.router, prefix=settings.api_v1_prefix)
     app.include_router(documents.router, prefix=settings.api_v1_prefix)
     app.include_router(chat.router, prefix=settings.api_v1_prefix)
     app.include_router(conversations.router, prefix=settings.api_v1_prefix)
     app.include_router(admin.router, prefix=settings.api_v1_prefix)
+    app.include_router(account.router, prefix=settings.api_v1_prefix)
 
     @app.get("/", tags=["root"])
     async def root() -> dict[str, str]:

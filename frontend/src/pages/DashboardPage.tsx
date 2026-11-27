@@ -4,6 +4,7 @@ import { api } from "../api/client";
 import type { Conversation, DocumentStatus } from "../api/types";
 import { useAuth } from "../auth/AuthContext";
 import { Card, EmptyState, PageHeader, Spinner, StatusBadge, timeAgo } from "../components/ui";
+import { UsageCard } from "../components/Usage";
 import { useDocuments } from "../hooks";
 
 const STATUSES: DocumentStatus[] = ["completed", "processing", "queued", "uploaded", "failed"];
@@ -59,6 +60,7 @@ export function DashboardPage() {
               </ul>
             )}
           </Card>
+          <div className="mt-6"><UsageCard /></div>
         </section>
 
         <section className="min-w-0">

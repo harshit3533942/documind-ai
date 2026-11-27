@@ -92,6 +92,23 @@ def request_document_summary(
     return DocumentRead.model_validate(DocumentService(db, storage, queue).request_summary(user, document_id))
 
 
+@router.get("/trash", response_model=Page[DocumentRead])
+def list_trash(
+    user: CurrentUser, db: DbSession, storage: Storage,
+    limit: Annotated[int, Query(ge=1, le=100)] = 50, offset: Annotated[int, Query(ge=0)] = 0,
+) -> Page[DocumentRead]:
+    """Your deleted documents, most recently deleted first. They are purged
+    automatically TRASH_RETENTION_DAYS after deletion."""
+    items, total = DocumentService(db, storage).list_trash(user, limit=limit, offset=offset)
+    return Page[DocumentRead](items=[DocumentRead.model_validate(d) for d in items], total=total, limit=limit, offset=offset)
+
+
+@router.post("/{document_id}/restore", response_model=DocumentRead)
+def restore_document(document_id: uuid.UUID, user: CurrentUser, db: DbSession, storage: Storage) -> DocumentRead:
+    """Move a document back from the trash; it is searchable again immediately."""
+    return DocumentRead.model_validate(DocumentService(db, storage).restore(user, document_id))
+
+
 @router.get("", response_model=Page[DocumentRead])
 def list_documents(
     user: CurrentUser,
@@ -152,6 +169,15 @@ def list_document_chunks(
 
 
 @router.delete("/{document_id}", status_code=status.HTTP_204_NO_CONTENT)
-def delete_document(document_id: uuid.UUID, user: CurrentUser, db: DbSession, storage: Storage) -> Response:
-    DocumentService(db, storage).delete(user, document_id)
+def delete_document(
+    document_id: uuid.UUID, user: CurrentUser, db: DbSession, storage: Storage,
+    permanent: Annotated[bool, Query(description="true = delete for good (also for a document in the trash)")] = False,
+) -> Response:
+    """Move to the trash (default; restorable) or, with `permanent=true`,
+    delete the file, its text and embeddings for good."""
+    service = DocumentService(db, storage)
+    if permanent:
+        service.delete(user, document_id)
+    else:
+        service.move_to_trash(user, document_id)
     return Response(status_code=status.HTTP_204_NO_CONTENT)

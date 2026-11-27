@@ -26,6 +26,7 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.core import metrics
 from app.core.config import get_settings
 from app.core.exceptions import ConflictError, NotFoundError
 from app.core.logging import get_logger
@@ -58,6 +59,16 @@ def _jsonable(value: Any) -> Any:
     if isinstance(value, list | tuple):
         return [_jsonable(v) for v in value]
     return value
+
+
+@dataclass
+class CacheSlot:
+    """Where the answer to one question is (or will be) cached."""
+
+    answer_key: str
+    semantic_key: str
+    question: str
+    vector: list[float] | None = None
 
 
 @dataclass
@@ -189,6 +200,7 @@ class ChatService:
             self.db.rollback()
             raise
         self.db.refresh(conversation)
+        metrics.observe_answer(result.timings_ms, mode=result.mode, found=result.found, cached=result.cached)
         logger.info(
             "Chat answer user=%s conversation=%s mode=%s found=%s citations=%d total=%.0fms",
             ctx.user.id, conversation.id, result.mode, result.found, len(result.citations),
@@ -202,21 +214,47 @@ class ChatService:
         return RagService(self.db, self.embedder, self.llm, self.reranker)
 
     def _cache_lookup(
-        self, user: User, question: str, document_ids: Sequence[uuid.UUID] | None
-    ) -> tuple[str | None, RagAnswer | None]:
-        """(cache key or None if Redis is down, cached answer or None)."""
+        self, user: User, question: str, document_ids: Sequence[uuid.UUID] | None, *, use_cache: bool = True
+    ) -> tuple["CacheSlot | None", RagAnswer | None]:
+        """(where to store a new answer - None if Redis is down, cached answer or None).
+
+        1. exact: same normalised question  2. semantic: a question that means the same."""
         started = time.perf_counter()
         version = cache_service.document_version(user.id)
         if version is None:
             return None, None
-        key = cache_service.answer_key(user.id, version, question, document_ids, self._mode_tag())
-        if (hit := cache_service.get_answer(key)) is None:
-            return key, None
+        mode_tag = self._mode_tag()
+        slot = CacheSlot(
+            answer_key=cache_service.answer_key(user.id, version, question, document_ids, mode_tag),
+            semantic_key=cache_service.semantic_key(user.id, version, document_ids, mode_tag),
+            question=question,
+        )
+        if not use_cache:  # regenerate: never serve, only store the fresh answer
+            return slot, None
+        hit, similarity = cache_service.get_answer(slot.answer_key), None
+        if hit is None and get_settings().semantic_cache_enabled and self.embedder is not None:
+            # The question's embedding is needed for retrieval anyway; CachedEmbedder
+            # keeps it in Redis, so this costs no extra model call.
+            slot.vector = self.embedder.embed_query(question)
+            match = cache_service.semantic_lookup(slot.semantic_key, question, slot.vector)
+            if match is not None:
+                hit, similarity = cache_service.get_json(match.answer_key), match.similarity
+            cache_service.record("semantic_hit" if hit is not None else "semantic_miss")
+        if hit is None:
+            return slot, None
         result = RagAnswer.from_dict(hit)
-        result.cached = True
+        result.cached, result.cache_similarity = True, similarity
         result.timings_ms = {"cache": round((time.perf_counter() - started) * 1000, 1)}
         result.timings_ms["total"] = result.timings_ms["cache"]
-        return key, result
+        return slot, result
+
+    def _cache_store(self, slot: "CacheSlot | None", result: RagAnswer) -> None:
+        if slot is None or result.llm_error is not None:  # never cache a degraded (fallback) answer
+            return
+        cache_service.set_answer(slot.answer_key, result.to_dict())
+        if get_settings().semantic_cache_enabled and self.embedder is not None:
+            vector = slot.vector if slot.vector is not None else self.embedder.embed_query(slot.question)
+            cache_service.semantic_store(slot.semantic_key, slot.question, vector, slot.answer_key)
 
     def _answer(
         self, user: User, question: str, document_ids: Sequence[uuid.UUID] | None, history: list[ChatMessage],
@@ -228,12 +266,11 @@ class ChatService:
         rag = self._rag()
         if history:
             return rag.answer(user_id=user.id, question=question, document_ids=document_ids, history=history)
-        key, hit = self._cache_lookup(user, question, document_ids)
-        if hit is not None and use_cache:
+        slot, hit = self._cache_lookup(user, question, document_ids, use_cache=use_cache)
+        if hit is not None:
             return hit
         result = rag.answer(user_id=user.id, question=question, document_ids=document_ids)
-        if key is not None and result.llm_error is None:  # never cache a degraded (fallback) answer
-            cache_service.set_answer(key, result.to_dict())
+        self._cache_store(slot, result)
         return result
 
     def _answer_stream(
@@ -245,14 +282,14 @@ class ChatService:
         if history:
             yield from rag.answer_stream(user_id=user.id, question=question, document_ids=document_ids, history=history)
             return
-        key, hit = self._cache_lookup(user, question, document_ids)
-        if hit is not None and use_cache:
+        slot, hit = self._cache_lookup(user, question, document_ids, use_cache=use_cache)
+        if hit is not None:
             yield from text_pieces(hit.answer)
             yield "final", hit
             return
         for kind, payload in rag.answer_stream(user_id=user.id, question=question, document_ids=document_ids):
-            if kind == "final" and key is not None and payload.llm_error is None:  # type: ignore[union-attr]
-                cache_service.set_answer(key, payload.to_dict())  # type: ignore[union-attr]
+            if kind == "final":
+                self._cache_store(slot, payload)  # type: ignore[arg-type]
             yield kind, payload
 
     def _mode_tag(self) -> str:
@@ -270,7 +307,7 @@ class ChatService:
     def _check_documents(self, user: User, document_ids: Sequence[uuid.UUID]) -> None:
         rows = self.db.execute(
             select(Document.id, Document.filename, Document.status).where(
-                Document.id.in_(list(document_ids)), Document.user_id == user.id
+                Document.id.in_(list(document_ids)), Document.user_id == user.id, Document.deleted_at.is_(None)
             )
         ).all()
         found = {r.id: r for r in rows}
@@ -293,6 +330,7 @@ class ChatService:
             "llm_error": result.llm_error,
             "timings_ms": result.timings_ms,
             "cached": result.cached,
+            "cache_similarity": result.cache_similarity,
         })
 
     # ------------------------------------------------------------ conversations

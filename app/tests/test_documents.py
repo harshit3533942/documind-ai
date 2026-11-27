@@ -216,9 +216,10 @@ def test_delete_removes_row_chunks_and_file(client, alice, storage, db_session: 
                                  content="x", page_start=1, page_end=1))
     db_session.flush()
 
-    resp = client.delete(f"{DOCS}/{doc_id}", headers=alice)
+    resp = client.delete(f"{DOCS}/{doc_id}", headers=alice, params={"permanent": "true"})
     assert resp.status_code == 204
     assert client.get(f"{DOCS}/{doc_id}", headers=alice).status_code == 404
     assert db_session.scalar(select(func.count()).select_from(DocumentChunk)) == 0
     assert stored_files(storage) == []
+    assert client.delete(f"{DOCS}/{doc_id}", headers=alice, params={"permanent": "true"}).status_code == 404
     assert client.delete(f"{DOCS}/{doc_id}", headers=alice).status_code == 404

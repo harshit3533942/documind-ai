@@ -23,10 +23,14 @@ class DocumentRepository:
         self.db.flush()
         return document
 
-    def get_for_user(self, document_id: uuid.UUID, user_id: uuid.UUID) -> Document | None:
-        return self.db.scalar(
-            select(Document).where(Document.id == document_id, Document.user_id == user_id)
-        )
+    def get_for_user(
+        self, document_id: uuid.UUID, user_id: uuid.UUID, *, trashed: bool | None = False
+    ) -> Document | None:
+        """trashed: False = only live documents (default), True = only trashed, None = both."""
+        conditions = [Document.id == document_id, Document.user_id == user_id]
+        if trashed is not None:
+            conditions.append(Document.deleted_at.is_not(None) if trashed else Document.deleted_at.is_(None))
+        return self.db.scalar(select(Document).where(*conditions))
 
     def find_by_hash(self, user_id: uuid.UUID, file_hash: str) -> Document | None:
         return self.db.scalar(
@@ -37,7 +41,7 @@ class DocumentRepository:
         active = (DocumentStatus.UPLOADED, DocumentStatus.QUEUED, DocumentStatus.PROCESSING)
         return list(self.db.scalars(
             select(Document)
-            .where(Document.user_id == user_id, Document.status.in_(active))
+            .where(Document.user_id == user_id, Document.status.in_(active), Document.deleted_at.is_(None))
             .order_by(Document.created_at.desc())
             .limit(limit)
         ))
@@ -50,7 +54,7 @@ class DocumentRepository:
         offset: int,
         status: DocumentStatus | None = None,
     ) -> tuple[list[Document], int]:
-        conditions = [Document.user_id == user_id]
+        conditions = [Document.user_id == user_id, Document.deleted_at.is_(None)]
         if status is not None:
             conditions.append(Document.status == status)
 
@@ -63,6 +67,20 @@ class DocumentRepository:
             .offset(offset)
         ).all()
         return list(rows), total
+
+    def list_trash(self, user_id: uuid.UUID, *, limit: int, offset: int) -> tuple[list[Document], int]:
+        conditions = (Document.user_id == user_id, Document.deleted_at.is_not(None))
+        total = self.db.scalar(select(func.count()).select_from(Document).where(*conditions)) or 0
+        rows = self.db.scalars(
+            select(Document).where(*conditions).order_by(Document.deleted_at.desc(), Document.id).limit(limit).offset(offset)
+        ).all()
+        return list(rows), total
+
+    def trash_older_than(self, cutoff, limit: int = 200) -> list[Document]:  # noqa: ANN001 - datetime
+        """Maintenance (all users): trashed documents due for purging."""
+        return list(self.db.scalars(
+            select(Document).where(Document.deleted_at < cutoff).order_by(Document.deleted_at).limit(limit)
+        ))
 
     def list_chunks(
         self, document_id: uuid.UUID, user_id: uuid.UUID, *, limit: int, offset: int

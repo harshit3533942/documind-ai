@@ -11,6 +11,7 @@ Text extraction, chunking and embeddings happen later in a background worker.
 """
 
 import uuid
+from datetime import UTC, datetime, timedelta
 from pathlib import Path, PurePosixPath
 from typing import BinaryIO
 
@@ -28,7 +29,7 @@ from app.core.exceptions import (
 from app.core.logging import get_logger
 from app.models import Document, DocumentChunk, DocumentStatus, User
 from app.repositories.document_repository import DocumentRepository
-from app.services import cache_service, conversion_service, pdf_service
+from app.services import cache_service, conversion_service, pdf_service, quota_service
 from app.services.document_processing_service import mark_queued
 from app.services.storage_service import EmptyFileError, FileTooLargeError, LocalStorage, StoredFile
 from app.services.task_queue import TaskQueue
@@ -78,7 +79,9 @@ class DocumentService:
         # From here on, any failure must remove the file we just wrote.
         try:
             if existing := self.documents.find_by_hash(user.id, stored.sha256):
-                raise ConflictError(f"You already uploaded this file as '{existing.filename}' (id {existing.id})")
+                where = " - it is in the trash, restore it from there" if existing.deleted_at else ""
+                raise ConflictError(f"You already uploaded this file as '{existing.filename}' (id {existing.id}){where}")
+            quota_service.check_upload(self.db, user, stored.size)
             if source_type != "pdf":
                 self._convert(stored, source_type)
             info = self._validate_pdf(stored)
@@ -189,9 +192,35 @@ class DocumentService:
         self.get(user, document_id)  # 404 if not the owner
         return self.documents.list_chunks(document_id, user.id, limit=limit, offset=offset)
 
+    # ------------------------------------------------------------ trash
+    def move_to_trash(self, user: User, document_id: uuid.UUID) -> Document:
+        """Soft delete: hidden everywhere at once, restorable, purged later."""
+        document = self.get(user, document_id)
+        document.deleted_at = datetime.now(UTC)
+        self.db.commit()
+        cache_service.bump_document_version(user.id)  # cached answers may cite it
+        logger.info("Document %s moved to trash by user %s", document.id, user.id)
+        return document
+
+    def restore(self, user: User, document_id: uuid.UUID) -> Document:
+        document = self.documents.get_for_user(document_id, user.id, trashed=True)
+        if document is None:
+            raise NotFoundError("Document not found in the trash")
+        document.deleted_at = None
+        self.db.commit()
+        cache_service.bump_document_version(user.id)  # searchable again
+        logger.info("Document %s restored by user %s", document.id, user.id)
+        return document
+
+    def list_trash(self, user: User, *, limit: int, offset: int) -> tuple[list[Document], int]:
+        return self.documents.list_trash(user.id, limit=limit, offset=offset)
+
     # ------------------------------------------------------------ delete
     def delete(self, user: User, document_id: uuid.UUID) -> None:
-        document = self.get(user, document_id)
+        """Permanent delete (live or trashed document): row, chunks and file."""
+        document = self.documents.get_for_user(document_id, user.id, trashed=None)
+        if document is None:
+            raise NotFoundError("Document not found")
         key = document.storage_key
         self.documents.delete(document)
         # Commit the DB delete FIRST. If the file delete then fails we only leave
@@ -204,3 +233,19 @@ class DocumentService:
         except OSError:
             logger.exception("Document %s deleted but file %s could not be removed", document_id, key)
         logger.info("Document deleted id=%s user=%s", document_id, user.id)
+
+
+def purge_trash(db: Session, storage: LocalStorage, *, now: datetime | None = None) -> int:
+    """Permanently delete documents trashed more than TRASH_RETENTION_DAYS ago."""
+    cutoff = (now or datetime.now(UTC)) - timedelta(days=get_settings().trash_retention_days)
+    documents = DocumentRepository(db).trash_older_than(cutoff)
+    keys = [d.storage_key for d in documents]
+    for document in documents:
+        db.delete(document)  # chunks: ON DELETE CASCADE
+    db.commit()  # DB first: a failed file delete only leaves an orphan file
+    for key in keys:
+        try:
+            storage.delete(key)
+        except OSError:
+            logger.exception("Purged document file %s could not be removed", key)
+    return len(documents)

@@ -2,6 +2,8 @@
 #
 #   Full stack:      docker compose up -d --build        -> http://localhost:8080
 #   Only DB + Redis: docker compose up -d postgres redis  (for local development / pytest)
+#   + monitoring:    docker compose --profile monitoring up -d
+#                    -> Grafana http://localhost:3000, Prometheus http://localhost:9090
 #   Logs:            docker compose logs -f api worker
 #   Stop:            docker compose down                  (data is kept in volumes)
 #   Reset ALL data:  docker compose down -v               (DELETES database, uploads)
@@ -40,6 +42,8 @@ x-app: &app
     EMAIL_FROM: ${EMAIL_FROM:-DocuMind AI <no-reply@documind.local>}
     FRONTEND_BASE_URL: ${FRONTEND_BASE_URL:-http://localhost:8080}
     REQUIRE_EMAIL_VERIFICATION: ${REQUIRE_EMAIL_VERIFICATION:-false}
+    METRICS_TOKEN: ${METRICS_TOKEN:-}
+    RATE_LIMIT_ENABLED: ${RATE_LIMIT_ENABLED:-true}   # false only for load tests (docs/load-testing.md)
   volumes:
     - uploads_data:/app/storage/uploads   # shared by api (writes) and worker (reads)
   depends_on: &app-deps
@@ -156,7 +160,45 @@ services:
       api:
         condition: service_healthy
 
+  # ------------------------------------------------------------ monitoring (optional profile)
+  prometheus:
+    image: prom/prometheus:v2.55.1
+    profiles: ["monitoring"]
+    restart: unless-stopped
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.retention.time=15d
+    volumes:
+      - ./docker/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    ports:
+      - "127.0.0.1:9090:9090"
+    depends_on:
+      api:
+        condition: service_healthy
+
+  grafana:
+    image: grafana/grafana:11.3.1
+    profiles: ["monitoring"]
+    restart: unless-stopped
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/documind.json
+    volumes:
+      - ./docker/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./docker/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana_data:/var/lib/grafana
+    ports:
+      - "127.0.0.1:3000:3000"
+    depends_on:
+      - prometheus
+
 volumes:
   postgres_data:
   redis_data:
   uploads_data:
+  prometheus_data:
+  grafana_data:

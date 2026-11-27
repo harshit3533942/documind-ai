@@ -52,6 +52,13 @@ function MessageBubble({ m, onView, onRate, onRegenerate }: { m: Message } & Bub
               {copied ? "Copied ✓" : "Copy"}
             </button>
             {onRegenerate && <button className={iconButton} onClick={onRegenerate}>↻ Regenerate</button>}
+            {m.cached && (
+              <span className="px-1.5 text-xs text-ink-soft" title="Regenerate for a fresh answer">
+                {m.cache_similarity
+                  ? `⚡ Reused answer to a similar question (${Math.round(m.cache_similarity * 100)}% match)`
+                  : "⚡ Cached answer"}
+              </span>
+            )}
             {onRate && (
               <span className="ml-auto flex items-center gap-1" role="group" aria-label="Rate this answer">
                 <button

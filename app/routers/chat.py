@@ -17,6 +17,7 @@ from app.core.rate_limit import limit_by_user
 from app.core.sse import sse_event, sse_response
 from app.models import Conversation, Message
 from app.schemas.chat import AskRequest, AskResponse, MessageRead
+from app.services import quota_service
 from app.services.chat_service import ChatService
 from app.services.rag_service import RagAnswer
 
@@ -25,6 +26,13 @@ logger = get_logger(__name__)
 
 # Both endpoints share ONE budget ("chat"): streaming is not a way around the limit.
 _chat_limit = Depends(limit_by_user("chat", "rate_limit_chat_per_user", 60))
+
+
+def _question_quota(user: CurrentUser) -> None:
+    quota_service.consume_question(user)  # daily quota (429 when used up)
+
+
+_quota = Depends(_question_quota)
 
 
 def _response(conversation: Conversation, user_msg: Message, assistant_msg: Message, result: RagAnswer) -> AskResponse:
@@ -36,10 +44,11 @@ def _response(conversation: Conversation, user_msg: Message, assistant_msg: Mess
         search_query=result.search_query,
         timings_ms=result.timings_ms,
         cached=result.cached,
+        cache_similarity=result.cache_similarity,
     )
 
 
-@router.post("/ask", response_model=AskResponse, dependencies=[_chat_limit])
+@router.post("/ask", response_model=AskResponse, dependencies=[_chat_limit, _quota])
 def ask(
     body: AskRequest, user: CurrentUser, db: DbSession, embedder: EmbedderDep, llm: LLMDep, reranker: RerankerDep
 ) -> AskResponse:
@@ -57,7 +66,7 @@ def ask(
 
 
 @router.post(
-    "/stream", dependencies=[_chat_limit], response_class=StreamingResponse,
+    "/stream", dependencies=[_chat_limit, _quota], response_class=StreamingResponse,
     responses={200: {"content": {"text/event-stream": {}},
                      "description": "Server-Sent Events: `meta`, then `token`*, then `done` (or `error`)"}},
 )
