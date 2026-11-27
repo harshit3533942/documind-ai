@@ -54,14 +54,15 @@ class AuthService:
         self.users = UserRepository(db)
 
     def register(self, data: UserCreate) -> User:
+        # Hash BEFORE touching the database: the slow hash must not hold a
+        # pooled DB connection (under load that exhausted the pool -> 500s).
+        hashed = hash_password(data.password)
         if self.users.get_by_email(data.email):
             raise ConflictError("An account with this email already exists")
         try:
             # Role is NEVER taken from the request: public sign-up always creates
             # a normal user. Admins are created with scripts/create_admin.py.
-            user = self.users.create(
-                name=data.name, email=data.email, hashed_password=hash_password(data.password)
-            )
+            user = self.users.create(name=data.name, email=data.email, hashed_password=hashed)
             self.db.commit()
         except IntegrityError:
             # Two simultaneous sign-ups with the same email: the pre-check above
@@ -73,10 +74,15 @@ class AuthService:
 
     def authenticate(self, email: str, password: str) -> User:
         user = self.users.get_by_email(email.strip())
-        if user is None:
+        stored_hash = user.hashed_password if user is not None else None
+        # End the read transaction BEFORE the deliberately slow password check,
+        # so its connection goes back to the pool. Holding it during Argon2
+        # exhausted the pool under load (see docs/load-testing.md).
+        self.db.commit()
+        if user is None or stored_hash is None:
             burn_verification_time()
             raise UnauthorizedError(INVALID_CREDENTIALS)
-        if not verify_password(password, user.hashed_password):
+        if not verify_password(password, stored_hash):
             logger.info("Failed login for user id=%s", user.id)
             raise UnauthorizedError(INVALID_CREDENTIALS)
         if not user.is_active:
@@ -228,9 +234,10 @@ class AuthService:
     def reset_password(self, raw: str, new_password: str) -> User:
         """Set a new password and end EVERY session of the account: whoever
         knew the old password (or stole a refresh token) is logged out."""
+        hashed = hash_password(new_password)  # before the transaction (see register)
         user = self._consume_email_token(raw, TokenPurpose.RESET_PASSWORD)
         now = datetime.now(UTC)
-        user.hashed_password = hash_password(new_password)
+        user.hashed_password = hashed
         if user.email_verified_at is None:
             user.email_verified_at = now  # the reset link proved they own the inbox
         self.db.execute(

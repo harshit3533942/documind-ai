@@ -4,18 +4,21 @@
 A full-stack Retrieval-Augmented Generation (RAG) platform: FastAPI · PostgreSQL + pgvector ·
 Celery + Redis · Sentence Transformers · React + TypeScript · Docker.
 
-![tests](https://img.shields.io/badge/tests-307%20passing-brightgreen) ![coverage](https://img.shields.io/badge/app%20coverage-97%25-brightgreen) ![security](https://img.shields.io/badge/pip--audit%20%7C%20npm%20audit%20%7C%20bandit-0%20issues-brightgreen) ![python](https://img.shields.io/badge/python-3.13-blue)
+![tests](https://img.shields.io/badge/tests-474%20passing-brightgreen) ![coverage](https://img.shields.io/badge/app%20coverage-98%25-brightgreen) ![security](https://img.shields.io/badge/pip--audit%20%7C%20npm%20audit%20%7C%20bandit-0%20issues-brightgreen) ![python](https://img.shields.io/badge/python-3.13-blue)
 
 ## Features
 
-- **Secure accounts** — registration, login, JWT, Argon2id, role-based admin access, rate-limited login
-- **PDF upload** — drag & drop with progress; validated (type, magic bytes, size, corrupt, password-protected), streamed to storage
-- **Background processing** — Celery workers extract text (PyMuPDF), chunk it page-aware, embed it locally, store vectors in pgvector; live status `uploaded → queued → processing → completed | failed`, automatic retries
-- **Grounded answers** — semantic search over *your own* documents only; answers cite **file + exact page + excerpt**; says *"the documents do not contain enough information"* instead of guessing
-- **Conversations** — history, continue later, follow-up questions ("and sick leave?"), choose which documents to search
+- **Secure accounts** — Argon2id, short-lived JWT in memory + rotating refresh token (httpOnly cookie, reuse detection), **email verification and password reset**, role-based admin access, rate limits
+- **Upload anything text-based** — drag & drop several files at once: **PDF, Word (.docx), text, Markdown**; scanned PDFs are read with **OCR** (Tesseract). Validated (type, magic bytes, size, zip bombs, corrupt, password-protected), streamed to storage
+- **Background processing** — Celery workers extract text, chunk it page-aware, embed it locally into pgvector; **live status over SSE with "page 12 of 40" progress**, automatic retries
+- **Grounded answers** — hybrid search (pgvector + full-text, RRF) and cross-encoder re-ranking over *your own* documents only; streamed answers cite **file + exact page + excerpt**, clickable into an in-app PDF viewer; says *"the documents do not contain enough information"* instead of guessing
+- **Document insights** — an automatic **summary and suggested questions** for every document
+- **Conversations** — history, follow-ups, **rename, full-text search, Markdown/JSON export**, stop / copy / regenerate / 👍👎
+- **Trash and quotas** — deleted documents go to a restorable **trash** (purged after 30 days); **per-user quotas** for documents, storage and questions per day (admin overrides)
 - **Works without an API key** — local extractive mode out of the box; plug in any OpenAI-compatible LLM (OpenAI, Groq, Ollama) via `.env`
-- **Fast** — Redis answer cache (~40 ms vs ~300 ms), query-embedding cache, versioned cache invalidation
-- **Admin** — users, processing statistics, failed-task monitoring and retry, system metrics
+- **Fast** — exact **and semantic** answer cache (paraphrased questions reuse answers, with number/negation guards), query-embedding cache, versioned invalidation
+- **Observable** — **Prometheus `/metrics` + a provisioned Grafana dashboard** (latency per route, RAG stage timings, cache hit ratios, queue, workers); **Locust load test**
+- **Admin** — users, quotas, processing statistics, failed-task monitoring and retry, system metrics
 - **Production-minded** — strict per-user isolation, security headers, safe error responses, health checks, one-command Docker deployment, CI
 
 ## Architecture
@@ -42,7 +45,8 @@ threshold → numbered context → LLM or extractive answer → citations valida
 | [docs/deployment.md](docs/deployment.md) | Docker architecture, configuration, production checklist, cloud options |
 | [docs/security.md](docs/security.md) | Security controls, audit results, known trade-offs |
 | [docs/testing.md](docs/testing.md) | Test strategy, requirement → test map, bugs the tests caught |
-| [docs/interview-prep.md](docs/interview-prep.md) | Project pitch, 12 core Q&As, system-design walkthrough |
+| [docs/load-testing.md](docs/load-testing.md) | Locust load test: how to run it, results, what limits throughput |
+| [docs/interview-prep.md](docs/interview-prep.md) | Project pitch, core Q&As, system-design walkthrough |
 
 ## Quick start (Docker — recommended)
 
@@ -54,7 +58,9 @@ python -c "import secrets; print(secrets.token_urlsafe(64))"   # put this into J
 docker compose up -d --build
 ```
 
-Open **http://localhost:8080** → register → upload a PDF → ask a question.
+Open **http://localhost:8080** → register → upload a document → ask a question.
+Emails (verification, password reset) are caught by Mailpit: **http://localhost:8025**.
+Monitoring: `docker compose --profile monitoring up -d` → Grafana **http://localhost:3000**, Prometheus **http://localhost:9090**.
 Details and production checklist: [docs/deployment.md](docs/deployment.md).
 
 ## Local development
@@ -118,20 +124,25 @@ Most important: `JWT_SECRET_KEY` (required), `POSTGRES_PASSWORD`, `OPENAI_API_KE
 | `POST /chat/ask` (full RAG, extractive) | ~310 ms | ~430 ms |
 | `POST /chat/ask` (answer cache hit) | ~40 ms | ~45 ms |
 
+Load test (Locust, 20 users, 5 min, everything on one laptop): 2,156 requests, 0 failures,
+`/chat/ask` p50 350 ms, 35 % answered from cache. It also found and fixed a connection-pool
+exhaustion under concurrent logins — see [docs/load-testing.md](docs/load-testing.md).
+
 ## Known limitations
 
 - Extractive mode (no LLM key) quotes sentences rather than writing a fluent answer and may include a closely related extra sentence.
-- Scanned PDFs need OCR (`OCR_ENABLED=true` + Tesseract installed); without it they are marked *failed* with a clear message.
-- JWTs live in `localStorage` and remain valid until expiry after logout (see [docs/security.md](docs/security.md) for the cookie/refresh-token upgrade path).
+- OCR is on in Docker (Tesseract, English); a local non-Docker setup needs Tesseract installed and `OCR_ENABLED=true`. OCR is slow (~1–3 s per scanned page).
+- Pages of DOCX/TXT/Markdown files are the pages of the PDF they are converted to (shown in the viewer), not Word's own page breaks.
+- An access token stays valid for up to 15 minutes after logout or a password reset (refresh tokens are revoked immediately).
+- The semantic cache is deliberately conservative (similarity ≥ 0.95 + same numbers/negations), so many paraphrases still get a fresh answer.
 - One embedding model process handles queries serially; scale with more API replicas or a GPU.
 - Uploads use local/volume storage; production should use object storage (S3).
 
 ## Future improvements
 
-Streaming answers (SSE) · hybrid search (BM25 + vectors) and re-ranking · OCR by default ·
-S3 storage with presigned URLs · refresh tokens + httpOnly cookies · email verification ·
-RAG evaluation set (faithfulness / recall@k) in CI · multi-tenant teams and sharing ·
-Prometheus/Grafana metrics · Kubernetes manifests.
+S3 storage with presigned URLs · RAG evaluation (faithfulness / recall@k) in CI ·
+multi-tenant teams and sharing · OCR languages per document · alerting rules
+(Alertmanager) · Kubernetes manifests · CI/CD with cloud deployment.
 
 ## Project status
 
@@ -150,3 +161,9 @@ Prometheus/Grafana metrics · Kubernetes manifests.
 - [x] **Phase 13** – Security audit and hardening (0 known vulnerabilities)
 - [x] **Phase 14** – Docker images, full Docker Compose deployment
 - [x] **Phase 15** – Documentation and interview preparation
+
+Improvements after the 15 phases: hybrid search + re-ranking + evaluation set · streaming
+answers · rotating refresh tokens · clickable citations with PDF viewer · stop/copy/regenerate/
+feedback · live processing status (SSE) · DOCX/TXT/Markdown + OCR · conversation rename/search/
+export · document summaries · email verification + password reset · Prometheus + Grafana ·
+trash + quotas · semantic cache · Locust load test.

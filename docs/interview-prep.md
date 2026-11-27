@@ -126,6 +126,20 @@ so the event loop stays free.
 8. **Trade-offs** — pgvector vs dedicated vector DB; local vs hosted embeddings;
    fixed vs sliding window rate limit; localStorage vs cookie tokens.
 
+## Improvement features — likely questions
+
+| Question | Short answer |
+|---|---|
+| How do you support DOCX/TXT/Markdown without a second pipeline? | Convert to PDF at upload (PyMuPDF Story), so pages/citations/viewer stay identical. The exact text per page goes into a sidecar because re-extracting from the PDF garbles e.g. Devanagari. |
+| How do live status updates work? | Worker `PUBLISH`es to a per-user Redis channel; an SSE endpoint subscribes and streams; a DB snapshot on every (re)connect covers lost pub/sub messages; slow polling as fallback. |
+| Why is `ILIKE '%term%'` fast here? | pg_trgm GIN index: trigrams make leading-wildcard search index-assisted. |
+| How is password reset made safe? | Random token, only hash stored, single-use, 30 min expiry, same response for unknown emails, email sent after the response, all sessions revoked. |
+| What do you monitor and why route templates as labels? | RED metrics per route, RAG stage latency, cache hit ratio, queue length. Raw paths with UUIDs would explode the number of time series. |
+| Soft delete — what can go wrong? | Every query must exclude trashed rows (search, chat selection, lists); duplicates must point to the trash; storage still counts until purge; a beat job purges after 30 days. |
+| How do you stop two parallel uploads from exceeding a quota? | `SELECT … FOR UPDATE` on the user row inside the upload transaction serialises them. |
+| What is the risk of a semantic cache? | Serving an answer to a *different* question. Measured: "revenue 2023" vs "2024" = 0.93 similarity. So threshold 0.95 + exact numbers + negation guard, scoped per user/documents/version. |
+| What did the load test find? | Connection-pool exhaustion: Argon2 ran while holding a DB connection. Fix: release the connection before hashing + semaphore on concurrent hashes. 2 × 500 → 0. |
+
 ## Real bugs from this project (great "tell me about a challenge" answers)
 
 | Situation | Root cause | Fix | Lesson |
@@ -137,3 +151,6 @@ so the event loop stays free.
 | Citations "pp. 1–3" for a sentence on p. 2 | Chunk-level page range only | Store character→page offsets per chunk | Precision matters for trust |
 | Thresholds wrongly guessed | Assumed scores instead of measuring | Calibrated on 11 real questions, regression-tested | Measure, don't guess |
 | 60 CVEs in dependencies | Old pins | pip-audit, upgraded, full suite + E2E green | Audit dependencies continuously |
+| Login p50 61 s + HTTP 500 under 20 concurrent users | Argon2 hash computed while holding a pooled DB connection; 40 hashes at once | Release connection before hashing; semaphore = cores / argon2 parallelism | Slow-by-design code must not hold shared resources |
+| Hindi text garbled in converted DOCX/TXT | PDF text re-extraction loses complex-script glyph mapping | Keep the original text per page in a sidecar | Don't round-trip data you already have |
+| Rejected .docx could not be deleted (Windows) | python-docx's exception kept the ZIP file handle open | Parse from `BytesIO` | Same lesson as the PyMuPDF bug: exceptions hold references |

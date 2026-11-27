@@ -14,13 +14,16 @@ Interactive docs (development): `http://127.0.0.1:8000/docs`.
 | Status | `code` | When |
 |---|---|---|
 | 401 | `unauthorized` | Missing/invalid/expired token, wrong credentials (`WWW-Authenticate: Bearer`) |
-| 403 | `permission_denied` | Authenticated but not allowed (e.g. non-admin on `/admin`) |
+| 403 | `permission_denied` | Authenticated but not allowed (e.g. non-admin on `/admin`, unverified email when `REQUIRE_EMAIL_VERIFICATION=true`) |
+| 403 | `quota_exceeded` | Document-count or storage quota used up (delete documents / empty the trash) |
 | 404 | `not_found` | Not found **or owned by another user** (existence is never revealed) |
 | 409 | `conflict` | Duplicate email/upload, document not ready, wrong state for retry |
 | 413 | `payload_too_large` | File above `MAX_UPLOAD_SIZE_MB` |
-| 415 | `unsupported_media_type` | Not a PDF (extension, content type or magic bytes) |
+| 415 | `unsupported_media_type` | Not PDF/DOCX/TXT/Markdown (extension, content type, magic bytes, binary "text") |
 | 422 | `unprocessable` / validation | Corrupt or password-protected PDF; invalid input (`{"detail": [{"loc", "msg", "type"}]}` — submitted values are never echoed) |
 | 429 | `rate_limited` | Too many requests (`Retry-After` header, seconds) |
+| 429 | `quota_exceeded` | Daily question quota used up (`Retry-After` = seconds until midnight UTC) |
+| 503 | `service_unavailable` | Background worker / broker unavailable for a request that needs it |
 | 500 | `internal_error` | Unexpected error (details only in server logs) |
 
 Every response carries `X-Request-ID` and `X-Response-Time-ms`.
@@ -47,13 +50,35 @@ OAuth2 password form (`application/x-www-form-urlencoded`): `username=<email>&pa
 ```
 Rate limits: 10/min per IP and 10/15 min per account.
 
-### `GET /auth/me` → the current user (same shape as register).
+### `GET /auth/me` → the current user (same shape as register, incl. `email_verified_at`).
+
+### Email verification and password reset
+
+| Method | Path | Body | Response |
+|---|---|---|---|
+| POST | `/auth/verify-email` | `{"token"}` from the emailed link | `200` user (`email_verified_at` set); `422` invalid/used/expired link |
+| POST | `/auth/verify-email/resend` | — (logged in) | `202`; older links stop working; `409` if already verified; 3/hour |
+| POST | `/auth/password-reset/request` | `{"email"}` | **always** `202 {"message": "If an account exists…"}` (no account enumeration); 3/hour per email |
+| POST | `/auth/password-reset/confirm` | `{"token", "new_password"}` | `204`; **every session of the account is revoked**; `422` invalid link or weak password |
+
+Registration sends the verification email automatically. Tokens are single-use, expire
+(48 h / 30 min) and only their SHA-256 hash is stored. Emails are sent after the response
+(BackgroundTasks).
+
+## Account
+
+### `GET /account/usage`
+```json
+{"limits": {"max_documents": 200, "max_storage_bytes": 1073741824, "max_questions_per_day": 300},
+ "usage":  {"documents": 3, "storage_bytes": 912345, "trashed_documents": 1, "questions_today": 12}}
+```
+`0` in a limit = unlimited. Documents in the trash count until they are deleted for good.
 
 ---
 
 ## Documents
 
-### `POST /documents` — upload
+### `POST /documents` — upload (PDF, DOCX, TXT, Markdown)
 `multipart/form-data`, field `file` (PDF ≤ 20 MB).
 ```json
 // 201
@@ -79,7 +104,24 @@ Status payload (for polling): `{"id", "status", "total_pages", "error_message", 
 
 ### `POST /documents/{id}/reprocess` → `202` status payload (`queued`). Allowed for `failed` or `completed` documents.
 
-### `DELETE /documents/{id}` → `204`. Removes the row, chunks/vectors (cascade) and the file.
+### `DELETE /documents/{id}` → `204`. Moves the document to the **trash**: hidden from lists, search and chat at once, restorable.
+### `DELETE /documents/{id}?permanent=true` → `204`. Deletes for good (also from the trash): row, chunks/vectors (cascade), file.
+### `GET /documents/trash` → page of trashed documents (`deleted_at` set). Purged automatically after `TRASH_RETENTION_DAYS` (30).
+### `POST /documents/{id}/restore` → `200` document, searchable again.
+
+### `GET /documents/events` — live status (Server-Sent Events)
+`snapshot` (your unfinished documents) first, then `document` events
+`{"document_id", "status", "pages_done", "pages_total", "error_message"}` while the worker
+processes. The stream ends after `DOCUMENT_EVENTS_MAX_SECONDS`; reconnect to continue.
+
+### `POST /documents/{id}/summary` → `202`
+(Re-)generates the summary and suggested questions in the background. They are created
+automatically after processing and returned on every document as `summary`,
+`suggested_questions` and `summarized_at`.
+
+Every document also has `source_type` (`pdf` | `docx` | `txt` | `md`). DOCX/TXT/MD are
+converted to PDF at upload, so `mime_type` (the stored file) is always `application/pdf`
+and citations/pages refer to that PDF.
 
 ---
 
@@ -122,6 +164,7 @@ Status payload (for polling): `{"id", "status", "total_pages", "error_message", 
 | `grounded` | The answer cites at least one real source |
 | `citations[].page_start/end` | Exact page(s) of the quoted excerpt; `chunk_page_*` = whole passage range |
 | `cached` | Served from the Redis answer cache |
+| `cache_similarity` | Set for a **semantic** cache hit: similarity (0–1) to the earlier question whose answer was reused |
 
 Errors: `404` unknown/foreign conversation or document id · `409` selected document not processed yet · `429` rate limit (30/min per user).
 
@@ -135,6 +178,10 @@ Errors: `404` unknown/foreign conversation or document id · `409` selected docu
 | GET | `/conversations/{id}` | One conversation summary |
 | GET | `/conversations/{id}/messages?limit=100&offset=0` | Messages oldest first (same shape as `user_message` / `assistant_message`) |
 | DELETE | `/conversations/{id}` | `204` — messages are deleted too |
+| GET | `/conversations?q=leave` | Search titles **and** message text (case-insensitive, `%`/`_` literal); each hit has `match_snippet` |
+| PATCH | `/conversations/{id}` | `{"title"}` → renamed conversation (its list position does not change) |
+| GET | `/conversations/{id}/export?format=markdown\|json` | File download (`Content-Disposition: attachment`) with questions, answers and citations |
+| PUT | `/conversations/{id}/messages/{message_id}/feedback` | `{"rating": 1 \| -1 \| null}` → message |
 
 ---
 
@@ -147,6 +194,7 @@ Errors: `404` unknown/foreign conversation or document id · `409` selected docu
 | GET | `/admin/documents/failed?limit&offset` | Failed documents: filename, owner email, error (metadata only, no content) |
 | POST | `/admin/documents/{id}/retry` | Re-queue a failed document → `202` |
 | GET | `/admin/metrics` | App uptime/mode/model, DB pool, Redis, queue length, cache hit/miss, rate-limit rejections, counts |
+| GET / PATCH | `/admin/users/{id}/quota` | Read / override a user's limits: `{"max_documents", "max_storage_mb", "max_questions_per_day"}` (`null` = default, `0` = unlimited; only sent fields change) |
 
 Create the first admin: `python -m scripts.create_admin --email admin@example.com`.
 
@@ -157,6 +205,7 @@ Create the first admin: `python -m scripts.create_admin --email admin@example.co
 | Path | Use | Response |
 |---|---|---|
 | `GET /health/live` | Liveness probe (process up) | `{"status": "ok"}` |
+| `GET /metrics` | Prometheus scrape endpoint (internal: not routed by nginx; optional `METRICS_TOKEN` bearer) | text exposition format |
 | `GET /health/ready` | Readiness probe (PostgreSQL + Redis) | `200 {"status": "ok", "checks": {"database": {"status": "ok", "pgvector": "0.8.7"}, "redis": {"status": "ok"}}}` or `503 degraded` |
 
 ## Example session (curl)

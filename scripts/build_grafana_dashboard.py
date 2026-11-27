@@ -70,7 +70,7 @@ def build() -> dict:
         row("Documents & workers", 34),
         series("Documents by status", [target("sum by (status) (documind_documents)", "{{status}}")], 0, 35, "short", stack=True),
         series("Processed / min", [target("sum by (status) (rate(documind_documents_processed_total[5m])) * 60", "{{status}}")], 12, 35, "short"),
-        stat("Avg processing time", "rate(documind_document_processing_seconds_total[30m]) "
+        stat("Avg processing time", "sum(rate(documind_document_processing_seconds_total[30m])) "
              "/ clamp_min(sum(rate(documind_documents_processed_total[30m])), 1e-9)", 0, 43, "s", w=6, decimals=1),
         stat("Pages processed (24 h)", "increase(documind_document_pages_processed_total[24h])", 6, 43, w=6, decimals=0),
         stat("Database up", "min(documind_database_up)", 12, 43, w=6),

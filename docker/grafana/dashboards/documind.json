@@ -1053,7 +1053,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "rate(documind_document_processing_seconds_total[30m]) / clamp_min(sum(rate(documind_documents_processed_total[30m])), 1e-9)",
+          "expr": "sum(rate(documind_document_processing_seconds_total[30m])) / clamp_min(sum(rate(documind_documents_processed_total[30m])), 1e-9)",
           "legendFormat": "",
           "refId": "A"
         }

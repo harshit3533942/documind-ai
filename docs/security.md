@@ -19,6 +19,12 @@
 | **Logging** | IDs only — never emails, passwords, tokens, questions or document text; access log without query strings; request IDs validated before being echoed (no header injection) | all services, `core/middleware.py` |
 | **Secrets** | `.env` git-ignored, `.env.example` has empty secret values; production refuses to start with the dev DB password, `DEBUG=true`, `CORS=*` or a placeholder JWT secret | `.gitignore`, `core/config.py` |
 | **Surface** | Swagger UI / OpenAPI disabled by default in production; Celery accepts JSON only (no pickle → no RCE via the broker) | `main.py`, `tasks/celery_app.py` |
+| **Email tokens** | Verification / reset links: 256-bit random, only SHA-256 stored, single use (atomic `UPDATE … WHERE used_at IS NULL RETURNING`), short expiry, newer link invalidates older; token removed from the URL after reading | `services/auth_service.py`, `pages/AccountPages.tsx` |
+| **Password reset** | Same `202` answer for unknown accounts (no enumeration), email sent after the response (no timing leak), rate-limited per IP and per email, **all refresh tokens revoked** on reset | `routers/auth.py` |
+| **New upload formats** | DOCX: ZIP entry count + total uncompressed size checked before parsing (zip bomb); parsed from memory. TXT/MD: NUL bytes rejected; Markdown rendered with raw HTML and images disabled | `services/conversion_service.py` |
+| **Quotas** | Per-user documents / storage (row lock against concurrent uploads) / questions per day; admin-only overrides | `services/quota_service.py` |
+| **Metrics** | `/metrics` not routed by nginx (internal network only), optional bearer token compared in constant time; route templates as labels (no ids, bounded cardinality) | `routers/health.py`, `core/metrics.py` |
+| **Semantic cache** | Strictly per user + document scope + document version; conservative threshold + number/negation guards so a different question never gets a cached answer | `services/cache_service.py` |
 | **Frontend** | React escapes all rendered text (no `dangerouslySetInnerHTML`); no third-party scripts; 401 → token cleared | `frontend/src` |
 
 ## Audit results (2026-11-24)
@@ -44,7 +50,7 @@ cd frontend; npm audit
 |---|---|---|
 | Token storage | JWT in `localStorage` (simple; vulnerable if an XSS bug ever exists) | httpOnly + `Secure` + `SameSite` cookie with CSRF token |
 | Logout | Stateless JWT stays valid until expiry (≤ 60 min) | Short access token + refresh token; Redis deny-list of `jti` on logout |
-| Registration enumeration | `409` reveals that an email is registered | Always "check your email" + email verification |
+| Registration enumeration | `409` reveals that an email is registered (password reset does not) | Always "check your email" on sign-up |
 | Rate-limit algorithm | Fixed window (burst up to 2× at window edges) | Sliding window / token bucket in Redis (Lua) |
 | File scanning | PDFs are parsed but not virus-scanned | ClamAV scan in the worker before processing |
 | Encryption at rest | Relies on disk/volume encryption | Encrypted volumes / S3 SSE-KMS for uploads, managed PostgreSQL encryption |

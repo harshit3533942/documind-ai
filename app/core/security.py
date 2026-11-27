@@ -7,7 +7,9 @@ GPUs. Each hash contains its own random salt + parameters, e.g.
 """
 
 import hashlib
+import os
 import secrets
+import threading
 import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -19,6 +21,17 @@ from argon2.exceptions import InvalidHashError, VerificationError, VerifyMismatc
 from app.core.config import get_settings
 
 _hasher = PasswordHasher()  # library defaults follow OWASP recommendations
+
+# Argon2id is slow and memory-hard ON PURPOSE (64 MiB and several passes per
+# hash). FastAPI runs sync endpoints in a ~40-thread pool, so a burst of
+# logins could run 40 hashes at once: ~2.5 GB of RAM and every hash slowed
+# down by CPU contention (seen in the Locust load test: login p50 = 61 s).
+# Each hash itself runs `parallelism` threads (4 by default), so the default
+# limit is cores / parallelism hashes at a time; the rest wait their turn,
+# which is faster overall than 40 hashes fighting over the CPU.
+_HASH_SLOTS = threading.BoundedSemaphore(
+    get_settings().password_hash_concurrency or max(1, (os.cpu_count() or 2) // _hasher.parallelism)
+)
 
 # Used when a login email does not exist: we still run one verification so the
 # response time is the same as for a wrong password. Otherwise an attacker
@@ -32,12 +45,14 @@ class TokenError(Exception):
 
 # ---------------------------------------------------------------- passwords
 def hash_password(password: str) -> str:
-    return _hasher.hash(password)
+    with _HASH_SLOTS:
+        return _hasher.hash(password)
 
 
 def verify_password(password: str, hashed: str) -> bool:
     try:
-        return _hasher.verify(hashed, password)
+        with _HASH_SLOTS:
+            return _hasher.verify(hashed, password)
     except (VerifyMismatchError, VerificationError, InvalidHashError):
         return False
 

@@ -229,6 +229,8 @@ class Settings(BaseSettings):
     # No default on purpose: the app refuses to start without a secret.
     # SecretStr hides the value in repr()/logs.
     jwt_secret_key: SecretStr = Field(min_length=32)
+    # Max. Argon2 hashes computed at the same time (0 = number of CPU cores).
+    password_hash_concurrency: int = Field(default=0, ge=0, le=256)
     jwt_algorithm: Literal["HS256", "HS384", "HS512"] = "HS256"
     jwt_issuer: str = "documind-ai"
     # Short-lived access token (kept only in memory by the web app) + a
